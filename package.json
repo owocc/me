@@ -1,0 +1,33 @@
+{
+  "name": "me",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "dependencies": {
+    "@vinext/cloudflare": "1.0.0-beta.7",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-server-dom-webpack": "^19.2.8",
+    "vinext": "1.0.0-beta.9"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.54.6",
+    "@tailwindcss/postcss": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "^6.1.1",
+    "@vitejs/plugin-rsc": "^0.5.34",
+    "tailwindcss": "latest",
+    "typescript": "latest",
+    "vite": "^8.2.2",
+    "wrangler": "^4.130.0"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vinext dev",
+    "build": "vinext build",
+    "start": "wrangler dev --config dist/server/wrangler.json",
+    "deploy": "vinext-cloudflare deploy --config dist/server/wrangler.json --experimental-warm-cdn-cache"
+  }
+}
