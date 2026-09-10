@@ -8,6 +8,8 @@
 @theme inline {
   --font-sans: 'Inter Variable', sans-serif;
   --font-heading: var(--font-sans);
+  /* 报纸标题衬线族：拉丁字形走西文衬线，汉字回落到宋体族。 */
+  --font-serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', SimSun, serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -26,6 +28,12 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  /* 报刊套红：纸上唯一的高饱和色，只用于头版视觉焦点。 */
+  --color-spot: var(--spot);
+  /* 桌面：纸张之外的那层底色。 */
+  --color-desk: var(--desk);
+  /* 纸的墨色：投影用。 */
+  --color-paper-ink: var(--paper-ink);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -50,30 +58,68 @@
 
 :root {
   color-scheme: light;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  /* 旧报纸配色：#62341F 台面、#F8CD9A 纸、#40281A 油墨，以下为等值 oklch。 */
+  --desk: oklch(0.379 0.074 44.5);
+  --background: oklch(0.874 0.082 71.2);
+  --foreground: oklch(0.303 0.043 50.8);
+  --card: oklch(0.901 0.069 73.1);
+  --card-foreground: oklch(0.303 0.043 50.8);
+  --popover: oklch(0.901 0.069 73.1);
+  --popover-foreground: oklch(0.303 0.043 50.8);
+  --primary: oklch(0.379 0.074 44.5);
+  --primary-foreground: oklch(0.874 0.082 71.2);
+  --secondary: oklch(0.842 0.084 69.8);
+  --secondary-foreground: oklch(0.303 0.043 50.8);
+  --muted: oklch(0.842 0.084 69.8);
+  --muted-foreground: oklch(0.444 0.067 58.9);
+  --accent: oklch(0.842 0.084 69.8);
+  --accent-foreground: oklch(0.303 0.043 50.8);
+  /* 纸上最深的一档红：原 shadcn 红在旧纸上只剩 3.2:1，压不住错误态文字。 */
+  --destructive: oklch(0.45 0.17 28);
+  --border: oklch(0.675 0.097 64.9);
+  --input: oklch(0.675 0.097 64.9);
+  --ring: oklch(0.512 0.083 57.9);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
+  --spot: oklch(0.47 0.17 29);
+  /* 纸的墨色：投影用。 */
+  --paper-ink: oklch(0.24 0.05 45);
+  /* 颗粒纹理：96px 一块的无缝噪点，纸面平铺它、影子拿它当遮罩。
+     feComponentTransfer 把噪声拉满对比度，否则均值偏亮、摆幅太弱，颗粒根本看不出来。 */
+  --paper-noise-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='table' tableValues='0 1'/%3E%3CfeFuncG type='table' tableValues='0 1'/%3E%3CfeFuncB type='table' tableValues='0 1'/%3E%3CfeFuncA type='table' tableValues='0 1'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)'/%3E%3C/svg%3E");
   --radius: 0.625rem;
+  /* 纸面素材：窄屏用竖版切片（506×1281），lg 起换横版整页（1035×782）。
+     --paper-art 同时喂给纸面背景、影子遮罩、颗粒遮罩，三者必须同一张图。 */
+  --paper-art: url("/new-2_cutout.webp");
+  --paper-ratio: 506 / 1281;
+  /* 版面内边（px 值按 16px 根字号折算成 rem，缩放时才不会走样）。 */
+  --paper-well-top: 3rem; /* 48px */
+  --paper-well-side: 2rem; /* 32px */
+  --paper-well-bottom: 5.5rem; /* 88px */
+  /* 报纸摆位：素材本身不是正矩形，这几个是给你微调用的——
+     tilt 平面旋转、skew 切变、rotateX/Y 透视里的横竖翻转，perspective 是镜头距离。 */
+  --paper-tilt: 0deg;
+  --paper-skew-x: 0deg;
+  --paper-skew-y: 0deg;
+  --paper-rotate-x: 0deg;
+  --paper-rotate-y: 0deg;
+  --paper-perspective: 1500px;
+  /* 场景：默认放大倍数 + 点击后推近的倍数 + 动画时长与曲线。 */
+  --scene-zoom: 1.08;
+  --scene-zoom-in: 1.7;
+  --zoom-duration: 900ms;
+  --zoom-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 视差：照片层的位移上限（px），位移由 background-motion.tsx 插值写入。 */
+  --bg-shift-range-x: 18;
+  --bg-shift-range-y: 12;
+  /* 保护边（px，纯数字，CSS 与 JS 都要读）：照片比场景容器四周各外扩这么多。
+     必须 > --bg-shift-range-*，否则视差把它推到极值时边缘会露出 body 的纯色底。
+     26 = 视差上限 18 + 8 余量，20 = 12 + 8。 */
+  --scene-guard-x: 26;
+  --scene-guard-y: 20;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -84,31 +130,72 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* lg 起换横版报纸整页；比例与素材一致，纸面才不会被拉变形。 */
+@media (width >= 64rem) {
+  :root {
+    --paper-art: url("/newspaper.webp");
+    --paper-ratio: 1035 / 782;
+    /* PC 版版面内边：顶部 69px（你要的值），底部 99px 是让正文仍落在素材底带之上的量。 */
+    --paper-well-top: 4.3125rem; /* 69px */
+    --paper-well-side: 3rem; /* 48px */
+    --paper-well-bottom: 6.1875rem; /* 99px */
+    --paper-tilt: 0.2deg;
+  }
+}
+
+/*
+ * 窄屏整体缩放：根字号跟着视口走，rem 尺寸（纸宽、字号、内边）等同比例放大，
+ * 于是纸和字永远同一个比例，素材不会被拉——就是 H5 页面的做法。
+ * 设计宽度 = 纸 22.5rem + 两侧留白 0.75rem ×2 = 24.375rem（390px）。
+ * 媒体查询里的 rem 是浏览器初始字号（16px），64rem 恒等于 1024px，
+ * 下面的缩放不会把断点本身一起放大。
+ */
+@media (width < 64rem) {
+  :root {
+    font-size: calc(100vw / 24.375);
+    -webkit-text-size-adjust: 100%;
+  }
+}
+
+/*
+ * lg 起换横版素材，同样按设计宽度缩放：纸 64rem + 两侧 2.5rem ×2 = 69rem（1104px）。
+ * 视口窄于 1104 就整体缩一点，宽了就停在 1:1，横版素材也永远不被拉。
+ */
+@media (64rem <= width < 69rem) {
+  :root {
+    font-size: calc(100vw / 69);
+  }
+}
+
 .dark {
   color-scheme: dark;
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  /* 夜版：同一张深褐纸，油墨换成米白。 */
+  --desk: oklch(0.379 0.074 44.5);
+  --background: oklch(0.205 0.014 55);
+  --foreground: oklch(0.955 0.014 75);
+  --card: oklch(0.245 0.016 55);
+  --card-foreground: oklch(0.955 0.014 75);
+  --popover: oklch(0.245 0.016 55);
+  --popover-foreground: oklch(0.955 0.014 75);
+  --primary: oklch(0.874 0.082 71.2);
+  --primary-foreground: oklch(0.205 0.014 55);
+  --secondary: oklch(0.285 0.02 55);
+  --secondary-foreground: oklch(0.955 0.014 75);
+  --muted: oklch(0.285 0.02 55);
+  --muted-foreground: oklch(0.72 0.03 65);
+  --accent: oklch(0.285 0.02 55);
+  --accent-foreground: oklch(0.955 0.014 75);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: oklch(0.96 0.02 70 / 12%);
+  --input: oklch(0.96 0.02 70 / 16%);
+  --ring: oklch(0.6 0.04 60);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
+  --spot: oklch(0.64 0.17 27.5);
+  --paper-ink: oklch(0 0 0);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);
@@ -124,6 +211,170 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground font-sans;
+    @apply bg-desk text-foreground font-sans;
   }
+  /*
+   * 场景：照片 + 几层光都收在这个 fixed 容器里，点击缩放时整场景一起推近。
+   * overflow: hidden 保证放大后不会露边；fixed 元素不参与滚动，页面不会被撑出滚动条。
+   *
+   * 定点缩放不靠 transform-origin（改它会瞬移支点，看上去就是「跳一下」），
+   * 而是把支点钉死在左上角，用 translate + scale 一起表达：
+   * translate 决定「绕哪一点」，scale 决定倍数，两者都在 transform 里 → 一并插值。
+   * 默认 translate 让 1.08 的放大正好以视口中心为中心。
+   * 点击时的目标矩阵由 scene-zoom.tsx 按**当前**计算矩阵算，内联写回，所以中途再点也不跳。
+   */
+  .bg-scene {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    pointer-events: none;
+    transform-origin: 0 0;
+    transform: translate3d(calc((1 - var(--scene-zoom, 1.08)) * 50vw), calc((1 - var(--scene-zoom, 1.08)) * 50vh), 0)
+      scale(var(--scene-zoom, 1.08));
+    transition: transform var(--zoom-duration, 900ms) var(--zoom-ease, cubic-bezier(0.22, 1, 0.36, 1));
+  }
+
+  /* 照片层：视差平移在这层，缩放交给场景容器。
+     四周外扩一圈保护边，视差把照片推走时边缘也不露底色。
+     z-index 必须和光层同为负值——auto 会让它落到「定位元素」那一层，
+     反而盖在 z-index:-1 的光层上面。同为负值时按树序画，照片在前、光在后。 */
+  .bg-scene::before {
+    content: "";
+    position: absolute;
+    inset-block: calc(var(--scene-guard-y, 20) * -1px);
+    inset-inline: calc(var(--scene-guard-x, 26) * -1px);
+    z-index: -1;
+    background: url("/bg-v1.webp") center / cover no-repeat;
+    transform: translate3d(calc(var(--bg-shift-x, 0) * 1px), calc(var(--bg-shift-y, 0) * 1px), 0);
+    will-change: transform;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bg-scene {
+      transition: none;
+    }
+  }
+  /*
+   * 光层是个通用的壳子：光源位置由 --lh-origin-x/y 打底、--lh-shift-x/y（百分比，
+   * 由 background-motion.tsx 按指针位置插值写入）实时挪动；颜色/半径/幅度在 .bg-light-*
+   * 里逐层配置。越近的层越小、越亮、幅度越大、跟得越快，几层叠起来就有纵深。
+   */
+  .bg-light {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    mix-blend-mode: screen;
+    background: radial-gradient(
+      ellipse var(--lh-size-x) var(--lh-size-y)
+        at calc(var(--lh-origin-x) + var(--lh-shift-x, 0) * 1%)
+        calc(var(--lh-origin-y) + var(--lh-shift-y, 0) * 1%),
+      var(--lh-color),
+      transparent 72%
+    );
+  }
+
+  /* 第一层：主光，琥珀金，最外圈最大最慢，只轻轻挪。 */
+  .bg-light-1 {
+    --lh-color: oklch(0.9 0.16 62 / 34%);
+    --lh-origin-x: 2%;
+    --lh-origin-y: -10%;
+    --lh-size-x: 78%;
+    --lh-size-y: 70%;
+    --lh-shift-range-x: 9;
+    --lh-shift-range-y: 7;
+    --lh-ease: 0.055;
+  }
+
+  /* 第二层：暖橙红，比主光偏右下一点，跟主光叠出一段更暖的过渡。 */
+  .bg-light-2 {
+    --lh-color: oklch(0.86 0.19 28 / 32%);
+    --lh-origin-x: 12%;
+    --lh-origin-y: -4%;
+    --lh-size-x: 60%;
+    --lh-size-y: 56%;
+    --lh-shift-range-x: 16;
+    --lh-shift-range-y: 12;
+    --lh-ease: 0.09;
+  }
+
+  /* 第三层：玫粉，最小最亮最近，幅度最大、跟得最快；和金橙撞在一起会泛出近白的暖粉。 */
+  .bg-light-3 {
+    --lh-color: oklch(0.88 0.16 325 / 28%);
+    --lh-origin-x: 6%;
+    --lh-origin-y: 6%;
+    --lh-size-x: 46%;
+    --lh-size-y: 42%;
+    --lh-shift-range-x: 30;
+    --lh-shift-range-y: 22;
+    --lh-ease: 0.16;
+  }
+}
+
+/* 印刷网点：半调网点纹理，网状点的颜色取当前文字色。 */
+@utility halftone {
+  background-image: radial-gradient(currentColor 0.75px, transparent 0.8px);
+  background-size: 5px 5px;
+}
+
+/* 报纸纸面：素材本身，铺满整张纸，宽高比跟着素材走（窄屏竖版、lg 横版）。
+   不设底色——羽化处要透出桌面，压一层颜色会在纸周围浮出一圈色晕。 */
+@utility paper-surface {
+  aspect-ratio: var(--paper-ratio);
+  background-image: var(--paper-art);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+
+/* 版面容器：正文一律排在这块内边里。它是绝对定位的覆盖层——
+   纸的高矮只由素材比例决定，内容再多也撑不大素材；排不下时会溢出到纸外，一眼可见。
+   内边按素材实测留白配置——竖版羽化 10–19px／右侧压边 40px／底带 65px，
+   横版羽化 24–32px／底带从约 88% 高处开始。换素材只改这里。 */
+@utility paper-well {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  padding: var(--paper-well-top) var(--paper-well-side) var(--paper-well-bottom);
+  @media (width >= 64rem) {
+    gap: 3rem;
+  }
+}
+
+/* 报纸摆位：旋转 / 切变 / 透视。所有参数都是变量，随时微调，不碰布局。 */
+@utility paper-tilt {
+  transform: perspective(var(--paper-perspective)) rotate(var(--paper-tilt)) skewX(var(--paper-skew-x))
+    skewY(var(--paper-skew-y)) rotateX(var(--paper-rotate-x)) rotateY(var(--paper-rotate-y));
+  transform-origin: 50% 50%;
+}
+
+/* 同一张素材当 alpha 遮罩：影子、颗粒都裁在纸的形状里。 */
+@utility paper-shape-mask {
+  mask-image: var(--paper-art);
+  mask-repeat: no-repeat;
+  mask-size: 100% 100%;
+}
+
+/* 纸面颗粒：把噪点平铺在纸和字上面。浅色纸用 overlay（明暗都走），
+   深色纸的底色太暗、overlay 咬不动，改用 screen 让它只往亮里跳。 */
+@utility paper-noise {
+  background-image: var(--paper-noise-image);
+  background-repeat: repeat;
+  background-size: 96px 96px;
+  mix-blend-mode: overlay;
+  opacity: 0.35;
+}
+
+.dark .paper-noise {
+  mix-blend-mode: screen;
+  opacity: 0.08;
+}
+
+/* 影子颗粒：同一张噪点当 alpha 遮罩，咬出麻点。 */
+@utility paper-noise-mask {
+  mask-image: var(--paper-noise-image);
+  mask-repeat: repeat;
+  mask-size: 96px 96px;
 }
