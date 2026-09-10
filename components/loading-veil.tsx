@@ -66,7 +66,7 @@ export function LoadingVeil({
         image.src = src;
         return promise;
       }),
-    ]).then(ready);
+    ]).then(() => ready());
     Promise.race([document.fonts.ready, deadline]).then(() => {
       if (cancelled) return;
       const box = glyphs.getBBox();

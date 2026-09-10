@@ -126,14 +126,8 @@
   --lens-out: 600ms;
   /* 四周失焦的模糊半径（越小越轻）。 */
   --lens-blur: 9px;
-  /* 视差：照片层的位移上限（px），位移由 background-motion.tsx 插值写入。 */
-  --bg-shift-range-x: 18;
-  --bg-shift-range-y: 12;
-  /* 保护边（px，纯数字，CSS 与 JS 都要读）：照片比场景容器四周各外扩这么多。
-     必须 > --bg-shift-range-*，否则视差把它推到极值时边缘会露出 body 的纯色底。
-     26 = 视差上限 18 + 8 余量，20 = 12 + 8。 */
-  --scene-guard-x: 26;
-  --scene-guard-y: 20;
+  /* 镜片边缘的折射高光颜色（着色器里按半径叠上去）。 */
+  --refraction-color: oklch(0.99 0.02 80 / 26%);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -228,173 +222,17 @@
     @apply bg-desk text-foreground font-sans;
   }
   /*
-   * 场景：照片 + 几层光都收在这个 fixed 容器里，点击缩放时整场景一起推近。
-   * 这里**不能**加 overflow: hidden —— 照片层四周外扩的保护边会被一起裁掉，
-   * 于是视差或缩放平移把照片推走时，边缘就露出 body 的纯色底。
-   * 场景是 fixed 的，放大后越出的部分不会撑出滚动条，不需要裁。
+   * 场景容器：固定铺满视口，画面内容全在里面的画布上（含视差/缩放/镜头/粒子）。
+   * 这里不再有 transform —— 定点缩放搬进了着色器，DOM 不参与逐帧合成。
    */
   .bg-scene {
     position: fixed;
     inset: 0;
     z-index: -1;
     pointer-events: none;
-    transform-origin: 0 0;
-    transform: translate3d(calc((1 - var(--scene-zoom, 1.08)) * 50vw), calc((1 - var(--scene-zoom, 1.08)) * 50vh), 0)
-      scale(var(--scene-zoom, 1.08));
-    transition: transform var(--zoom-duration, 900ms) var(--zoom-ease, cubic-bezier(0.22, 1, 0.36, 1));
-  }
-
-  /* 照片层（两层共用）：四周外扩一圈保护边，视差把照片推走时边缘也不露底色。
-     z-index 必须和光层同为负值——auto 会让它落到「定位元素」那一层，
-     反而盖在 z-index:-1 的光层上面。同为负值时按树序画，照片在前、光在后。 */
-  .bg-photo {
-    position: absolute;
-    inset-block: calc(var(--scene-guard-y, 20) * -1px);
-    inset-inline: calc(var(--scene-guard-x, 26) * -1px);
-    z-index: -1;
-    background: url("/bg-v1.webp") center / cover no-repeat;
-    transform: translate3d(calc(var(--bg-shift-x, 0) * 1px), calc(var(--bg-shift-y, 0) * 1px), 0);
-    will-change: transform;
-  }
-
-  /*
-   * 畸变镜头：加在**放大时冻住的那一帧**上（.bg-frame），而不是整个照片层。
-   * 原因：SVG 滤镜一旦套住 <video>，浏览器就要逐帧把视频喂进滤镜管线——
-   * 实测 79ms/帧（约 13fps），而同样大小的静态图只有 16.7ms/帧。
-   * 冻帧与视频画面逐像素相同，所以移到它身上既保住畸变，也保住 60fps。
-   * 畸变本身没法插值过渡，所以它在放大的起步瞬间挂上、复位瞬间摘掉；
-   * 能看见的四周失焦与折射高光则是渐进的。
-   */
-  :root.scene-zoomed .bg-frame {
-    filter: url(#lens-warp);
-  }
-
-  /*
-   * 四周失焦：这一层自己不画图像，只对背后（照片）做 backdrop-filter，
-   * 再用 lens-falloff.webp 的径向遮罩裁到外圈——中心锐、四周糊。
-   * opacity 可过渡，所以放大时淡入、复位时逐渐消失，不是硬切。
-   */
-  .bg-lens-blur {
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    backdrop-filter: blur(var(--lens-blur, 14px));
-    mask-image: url("/lens-falloff.webp");
-    mask-repeat: no-repeat;
-    mask-size: 100% 100%;
-    opacity: 0;
-    transition: opacity var(--lens-out, 600ms) var(--zoom-ease, cubic-bezier(0.22, 1, 0.36, 1));
-  }
-
-  /* 镜片边缘的折射高光：一圈偏暖的亮环，screen 叠上去，和失焦一起淡入淡出。 */
-  .bg-refraction {
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    mix-blend-mode: screen;
-    background: radial-gradient(
-      ellipse at center,
-      var(--refraction-inner, oklch(1 0 0 / 0%)) 68%,
-      var(--refraction-mid, oklch(0.98 0.05 78 / 10%)) 88%,
-      var(--refraction-edge, oklch(0.99 0.02 80 / 26%)) 97%,
-      var(--refraction-inner, oklch(1 0 0 / 0%)) 100%
-    );
-    opacity: 0;
-    transition: opacity var(--lens-out, 600ms) var(--zoom-ease, cubic-bezier(0.22, 1, 0.36, 1));
-  }
-
-  :root.scene-zoomed .bg-lens-blur,
-  :root.scene-zoomed .bg-refraction {
-    opacity: 1;
-    transition-duration: var(--lens-in, 320ms);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .bg-scene,
-    .bg-lens-blur,
-    .bg-refraction {
-      transition: none;
-    }
-
-    /* 过渡被关掉后，这些会变成「亮一秒再硬切」——干脆不出镜头。 */
-    :root.scene-zoomed .bg-frame {
-      filter: none;
-    }
-
-    :root.scene-zoomed .bg-lens-blur,
-    :root.scene-zoomed .bg-refraction {
-      opacity: 0;
-    }
-  }
-  /*
-   * 光单独一层，不放在 .bg-scene 里——它不跟着缩放走。
-   * 相当于打在场景上的固定灯：画面推近时，灯的位置、大小、亮度都不变。
-   */
-  .bg-lights {
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-  }
-
-  /*
-   * 每盏光是个通用的壳子：光源位置由 --lh-origin-x/y 打底、--lh-shift-x/y（百分比，
-   * 由 background-motion.tsx 按指针位置插值写入）实时挪动；颜色/半径/幅度在 .bg-light-*
-   * 里逐层配置。越近的层越小、越亮、幅度越大、跟得越快，几层叠起来就有纵深。
-   */
-  .bg-light {
-    position: absolute;
-    inset: 0;
-    mix-blend-mode: screen;
-    background: radial-gradient(
-      ellipse var(--lh-size-x) var(--lh-size-y)
-        at calc(var(--lh-origin-x) + var(--lh-shift-x, 0) * 1%)
-        calc(var(--lh-origin-y) + var(--lh-shift-y, 0) * 1%),
-      var(--lh-color),
-      transparent 72%
-    );
-  }
-
-  /* 第一层：主光，琥珀金，最外圈最大最慢，只轻轻挪。 */
-  .bg-light-1 {
-    --lh-color: oklch(0.9 0.16 62 / 34%);
-    --lh-origin-x: 2%;
-    --lh-origin-y: -10%;
-    --lh-size-x: 78%;
-    --lh-size-y: 70%;
-    --lh-shift-range-x: 9;
-    --lh-shift-range-y: 7;
-    --lh-ease: 0.055;
-  }
-
-  /* 第二层：暖橙红，比主光偏右下一点，跟主光叠出一段更暖的过渡。 */
-  .bg-light-2 {
-    --lh-color: oklch(0.86 0.19 28 / 32%);
-    --lh-origin-x: 12%;
-    --lh-origin-y: -4%;
-    --lh-size-x: 60%;
-    --lh-size-y: 56%;
-    --lh-shift-range-x: 16;
-    --lh-shift-range-y: 12;
-    --lh-ease: 0.09;
-  }
-
-  /* 第三层：玫粉，最小最亮最近，幅度最大、跟得最快；和金橙撞在一起会泛出近白的暖粉。 */
-  .bg-light-3 {
-    --lh-color: oklch(0.88 0.16 325 / 28%);
-    --lh-origin-x: 6%;
-    --lh-origin-y: 6%;
-    --lh-size-x: 46%;
-    --lh-size-y: 42%;
-    --lh-shift-range-x: 30;
-    --lh-shift-range-y: 22;
-    --lh-ease: 0.16;
   }
 }
 
-/* 印刷网点：半调网点纹理，网状点的颜色取当前文字色。 */
 @utility halftone {
   background-image: radial-gradient(currentColor 0.75px, transparent 0.8px);
   background-size: 5px 5px;
