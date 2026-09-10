@@ -1,8 +1,9 @@
+import { BackgroundVideo } from "@/components/background-video";
 /**
  * 背景场景：一张固定的照片 + 放大时才浮现的镜头效果。
  *
  * 照片只有一层：放大时把畸变滤镜直接加在它身上，不再复制一份图像去交叉淡化
- *   · .bg-photo  照片层，视差平移与畸变滤镜都在这一层；
+ *   · .bg-photo  照片/视频层：静音循环的视频铺满它，视差平移与畸变滤镜都挂在这一层；
  *   · .bg-lens-blur 只对背后做 backdrop-filter 的四周失焦（径向遮罩裁到外圈）；
  *   · .bg-refraction 最外圈一道折射高光，screen 叠上去，像镜片边缘吃光。
  *
@@ -34,7 +35,9 @@ export function BackgroundScene() {
             </filter>
           </defs>
         </svg>
-        <div className="bg-photo" />
+        <div className="bg-photo">
+          <BackgroundVideo src="/bg-loop.mp4" poster="/bg-v1.webp" />
+        </div>
         <div className="bg-lens-blur" />
         <div className="bg-refraction" />
       </div>

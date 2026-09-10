@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "@fontsource-variable/inter";
+@import "@fontsource/bonheur-royale/latin.css";
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
@@ -10,6 +11,8 @@
   --font-heading: var(--font-sans);
   /* 报纸标题衬线族：拉丁字形走西文衬线，汉字回落到宋体族。 */
   --font-serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', SimSun, serif;
+  /* 手写体：屏幕中央那个署名用，来自 @fontsource/bonheur-royale。 */
+  --font-script: 'Bonheur Royale', cursive;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -34,6 +37,8 @@
   --color-desk: var(--desk);
   /* 纸的墨色：投影用。 */
   --color-paper-ink: var(--paper-ink);
+  /* 加载过渡那行字的字色。 */
+  --color-loader-ink: var(--loader-ink);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -87,6 +92,8 @@
   --spot: oklch(0.47 0.17 29);
   /* 纸的墨色：投影用。 */
   --paper-ink: oklch(0.24 0.05 45);
+  /* 加载过渡里那行字的颜色：白 → 透明，透明之后它就是挖开的洞。 */
+  --loader-ink: oklch(0.99 0.004 80);
   /* 颗粒纹理：96px 一块的无缝噪点，纸面平铺它、影子拿它当遮罩。
      feComponentTransfer 把噪声拉满对比度，否则均值偏亮、摆幅太弱，颗粒根本看不出来。 */
   --paper-noise-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='table' tableValues='0 1'/%3E%3CfeFuncG type='table' tableValues='0 1'/%3E%3CfeFuncB type='table' tableValues='0 1'/%3E%3CfeFuncA type='table' tableValues='0 1'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)'/%3E%3C/svg%3E");
@@ -117,8 +124,8 @@
   /* 镜头畸变与折射高光：放大态持续存在，进得快、退得稳。 */
   --lens-in: 320ms;
   --lens-out: 600ms;
-  /* 四周失焦的模糊半径。 */
-  --lens-blur: 14px;
+  /* 四周失焦的模糊半径（越小越轻）。 */
+  --lens-blur: 9px;
   /* 视差：照片层的位移上限（px），位移由 background-motion.tsx 插值写入。 */
   --bg-shift-range-x: 18;
   --bg-shift-range-y: 12;
@@ -251,11 +258,14 @@
   }
 
   /*
-   * 畸变镜头：直接加在照片层上（图只有一层），放大态持续存在，复位即摘掉。
-   * 畸变本身没法插值过渡，所以它在缩放的起步瞬间挂上、复位瞬间摘掉——
-   * 两个时刻画面都在快速移动，看不出来；能看见的四周失焦与折射高光则是渐进的。
+   * 畸变镜头：加在**放大时冻住的那一帧**上（.bg-frame），而不是整个照片层。
+   * 原因：SVG 滤镜一旦套住 <video>，浏览器就要逐帧把视频喂进滤镜管线——
+   * 实测 79ms/帧（约 13fps），而同样大小的静态图只有 16.7ms/帧。
+   * 冻帧与视频画面逐像素相同，所以移到它身上既保住畸变，也保住 60fps。
+   * 畸变本身没法插值过渡，所以它在放大的起步瞬间挂上、复位瞬间摘掉；
+   * 能看见的四周失焦与折射高光则是渐进的。
    */
-  :root.scene-zoomed .bg-photo {
+  :root.scene-zoomed .bg-frame {
     filter: url(#lens-warp);
   }
 
@@ -309,7 +319,7 @@
     }
 
     /* 过渡被关掉后，这些会变成「亮一秒再硬切」——干脆不出镜头。 */
-    :root.scene-zoomed .bg-photo {
+    :root.scene-zoomed .bg-frame {
       filter: none;
     }
 
