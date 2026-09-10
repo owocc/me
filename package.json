@@ -32,7 +32,7 @@
   },
   "type": "module",
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "vinext dev --hostname 0.0.0.0",
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "deploy": "vinext-cloudflare deploy --config dist/server/wrangler.json --experimental-warm-cdn-cache"
