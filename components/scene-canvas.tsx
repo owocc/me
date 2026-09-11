@@ -2,21 +2,27 @@
 
 import { useEffect, useRef } from "react";
 
+import { ART_RATIO, heroGeometry } from "@/lib/hero-screen";
+
 /**
- * 首屏场景（WebGL2 一块画布）：视频铺满 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子。
+ * 首屏场景（WebGL2 一块画布）：视频 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子，
+ * 再按 PC 素材（显示器 + 草地…）合成上去——一块画布一趟画完。
  *
  * 为什么从 DOM 换成画布：原先畸变走 SVG feDisplacementMap、四周失焦走 backdrop-filter，
  * 画面里只要有 <video>，这两层滤镜就得逐帧把视频喂进滤镜管线——实测放大态 50ms/帧（约 20fps）。
  * 这些效果在着色器里只是几次纹理采样，一趟画完。本机（无 GPU、软件光栅化）实测：
  * 空闲与放大态均 33ms/帧，视频暂停（不重传纹理）时 16.7ms/帧。
  *
+ * 素材也不再是盖在画面上的 <img>：屏幕上那块透明洞、洞里的画面、素材自己的放大/显形/虚焦
+ * 全在这一个片段着色器里、按同一套版面坐标算。以前洞靠「一比一贴上去」对位，放大到 4–5 倍时
+ * 素材的直角边界会甩出屏幕、露出画面；现在缩放只是改了采样，几样东西永远咬在一起。
+ *
  * 分工：
  *   · 视差、缩放缓动、镜头淡入淡出、粒子漂移都在这里的 rAF 里算；
  *   · 滚动模糊（画面从屏幕底部往上糊、随滚动加深）在片段着色器里算，见 FRAG 里的 uSweep；
- *   · 尺寸只认自己那个容器的框（首屏里那层会动的画面，见 hero-scene.tsx）：容器是一块 16:9
- *     （宽度按「盖住版面」算，满屏时比视口大，缩进显示器时正好盖住屏幕那块洞），不铺到整页；
- *     光/粒子/镜头这些按版面调的参数在 resize() 里换算进画布坐标，露在视口里的那部分才不走样；
- *     指针/点击也只认容器内的坐标，滚到下面的板块上时画面不再跟着动；
+ *   · 素材的放大/显形/虚焦由 hero-scene.tsx 的滚动动画写进 state，这里每帧读（普通对象，不走 React）；
+ *   · 画布就是整个首屏版面（一屏 + 底下的 --hero-bleed）：素材按 cover 铺满，屏幕洞的位置
+ *     与大小照 lib/hero-screen.ts 里量好的比例算，两边共用同一份几何；
  *   · 视频只是纹理来源：元素铺在画布下面（保持可见→浏览器不会掐掉解码，被画布盖住→看不见）；
  *   · 画布拿不到 WebGL2 时它自己隐藏，底下那段视频就是兜底背景；
  *   · 容器整块滚出视野就停画（视频也一起暂停），看不见的场景不该一直烧 CPU。
@@ -46,39 +52,51 @@ const FRAG = `#version 300 es
 precision highp float;
 
 uniform sampler2D uVideo;
-uniform vec2 uRes;        // CSS 像素（cover / 支点都用它）
+uniform sampler2D uAsset;    // PC 素材（显示器 + 草地…），屏幕那块洞是全透明的
+uniform vec2 uRes;        // 版面（画布）CSS 像素
 uniform vec2 uBuffer;     // 绘制缓冲像素（gl_FragCoord 的量纲，含 DPR）
 uniform vec2 uVideoSize;
-uniform vec2 uPhotoOffset;   // px
-uniform float uZoom;
-uniform vec2 uPivot;         // px
+uniform vec2 uPhotoOffset;   // px（屏幕内视差）
+uniform float uZoom;         // 点击定点缩放的倍数
+uniform vec2 uPivot;         // px（屏幕内坐标）
 uniform float uLens;         // 0..1
 uniform float uBlurPx;
 uniform float uSweep;        // 0..1：往下滚了多少（一屏 = 1）
 uniform float uSweepBlur;    // 滚到底那一档的最大模糊半径（px）
 uniform float uEdgePx;       // 纸的上沿在屏幕上的 y（px，0 = 屏幕顶）
-uniform float uViewTop;      // 画面层顶边在视口里的 y（px）
+uniform float uViewTop;      // 画布顶边在视口里的 y（px）
 uniform float uViewH;        // 视口高（px）
 uniform vec3 uLightColor[3];
-uniform vec2 uLightPos[3];   // uv（画布）
+uniform vec2 uLightPos[3];   // uv（屏幕内）
 uniform vec2 uLightSize[3];  // uv 半轴
 uniform float uLightAmp[3];
-uniform vec2 uBoxScale;      // 版面（首屏那一屏）占画布的比例：画布是整块 16:9，比版面宽出来的部分不在视口里
+// 素材与屏幕洞：都是版面 px 的矩形（x, y, w, h），见 lib/hero-screen.ts。
+// 素材整块在这里摆：uBoardScale 是它当前放大多少倍（支点 = 洞心），洞与洞里的画面跟着一起放。
+// 三样共用一套坐标，缩放于是只是改了采样——没有 DOM 边界可露。
+uniform vec4 uArt;
+uniform vec4 uHole;
+uniform float uBoardScale;
+uniform float uAssetAlpha;   // 素材整体不透明度（0..1），滚过开头那段就一直是 1
+uniform float uAssetLod;     // 素材显形那层虚焦：mip 层数（0 = 原图，越大越糊）
+uniform vec3 uDesk;          // 素材还没显形时，它后面那层底色（网页台面）
 
 // 滚动模糊：一条贴着纸上沿往上铺的模糊带——越靠近纸越糊，往上渐清晰，整条随滚动加深。
 // 之所以贴着纸的上沿而不是屏幕底：纸盖上来以后屏幕底下那半截早被纸挡住了，
 // 把最糊的一段放在那儿等于白糊；纸的上沿才是「画面还露着的最下边」。
 const float SWEEP_BAND = 0.4;   // 模糊带高度（占视口高的比例）
+/** 素材固有宽度（px）：把 mip 层数换回版面 px 用，见 grow。 */
+const float ASSET_W = 2200.0;
 
 out vec4 outColor;
 
-// 屏幕 uv（y 向下）→ 视频 uv（含 cover 裁切、视差、定点缩放）
-vec2 videoUv(vec2 screenUv) {
-  vec2 px = screenUv * uRes;
+// 屏幕 uv（y 向下）→ 视频 uv（含 cover 裁切、视差、定点缩放）。框就是屏幕那块洞。
+vec2 videoUv(vec2 frameUv) {
+  vec2 frameRes = uHole.zw;
+  vec2 px = frameUv * frameRes;
   vec2 zoomed = uPivot + (px - uPivot) / uZoom;
-  float cover = max(uRes.x / uVideoSize.x, uRes.y / uVideoSize.y);
+  float cover = max(frameRes.x / uVideoSize.x, frameRes.y / uVideoSize.y);
   vec2 displayed = uVideoSize * cover;
-  vec2 origin = (uRes - displayed) * 0.5 - uPhotoOffset;
+  vec2 origin = (frameRes - displayed) * 0.5 - uPhotoOffset;
   return (zoomed - origin) / displayed;
 }
 
@@ -91,7 +109,8 @@ vec3 sampleVideo(vec2 uv, float blurPx) {
   for (int i = 0; i < 7; i++) {
     float a = float(i) * 2.399963;                       // 黄金角：7 个方向不重复
     float r = blurPx * (0.35 + 0.65 * float(i) / 6.0);
-    sum += tex(uv + vec2(cos(a), sin(a)) * r / uRes);
+    // 半径按屏幕（洞）归一，别按整块画布：画布比屏幕大，按它归一采样步就偏小
+    sum += tex(uv + vec2(cos(a), sin(a)) * r / uHole.zw);
   }
   return sum / 8.0;
 }
@@ -99,51 +118,84 @@ vec3 sampleVideo(vec2 uv, float blurPx) {
 void main() {
   // gl_FragCoord 是绘制缓冲像素（含 DPR），先归一到 0..1；y 翻转成左上为原点
   vec2 screenUv = vec2(gl_FragCoord.x / uBuffer.x, 1.0 - gl_FragCoord.y / uBuffer.y);
+  vec2 px = screenUv * uRes;
 
-  // 镜头：越靠边越往画面中心取采样（等于把四周向外拉伸），并叠加失焦
-  // 半径按「版面」归一（uBoxScale 把画布坐标换回版面坐标）：画布比版面宽出来的那截不算数。
-  // 否则露在视口里的那块版面永远落在画布的中央，四周的畸变与失焦就没了——竖屏手机上尤其明显。
-  vec2 boxUv = 0.5 + (screenUv - 0.5) / uBoxScale;
-  vec2 boxRes = uRes * uBoxScale;
-  vec2 centered = (boxUv - 0.5) * vec2(boxRes.x / boxRes.y, 1.0);
-  float radius = clamp(length(centered) / (0.5 * length(vec2(boxRes.x / boxRes.y, 1.0))), 0.0, 1.0);
-  float edge = smoothstep(0.25, 1.0, radius);
-  vec2 warpedUv = screenUv - (screenUv - 0.5) * (0.18 * uLens * edge);
+  // 反解素材那一路缩放（支点 = 洞心）：这个像素在「还没缩」的版面坐标里落在哪。
+  // 素材、屏幕洞、洞里的画面全都摆在这套坐标里，于是放大到几倍都对得上。
+  vec2 holeCenter = uHole.xy + uHole.zw * 0.5;
+  vec2 board = holeCenter + (px - holeCenter) / uBoardScale;
 
-  // 滚动模糊：vy 是像素在屏幕上的位置（0 = 屏幕顶，1 = 屏幕底）。
-  // uViewTop 是画布顶边在视口里的 y，加它才是屏幕坐标（减号会把整幅画面推到屏幕底下去）。
-  float vy = (screenUv.y * uRes.y + uViewTop) / max(uViewH, 1.0);
+  // 滚动模糊：像素在屏幕上的位置（0 = 屏幕顶，1 = 屏幕底）。uViewTop 是画布顶边在视口里的 y，
+  // 加它才是屏幕坐标（减号会把整幅画面推到屏幕底下去）。
+  float vy = (px.y + uViewTop) / max(uViewH, 1.0);
   float edgeVy = uEdgePx / max(uViewH, 1.0);
   float sweepT = clamp(1.0 - (edgeVy - vy) / SWEEP_BAND, 0.0, 1.0);
   float sweepPx = uSweep * uSweepBlur * sweepT;
+  // 同一档模糊，换成素材的 mip 层数：素材显形那几帧还露着，不该干干净净地糊
+  float sweepLod = log2(1.0 + sweepPx);
 
-  vec3 color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge + sweepPx);
+  // 素材：cover 之后按 uArt 归一。用 textureGrad 而不是 textureLod：导数乘上 2^lod 等于
+  // 「再糊 lod 层 mip」，同时保留硬件自己那档缩小选层——移动端素材从 2200 缩到 1600 上下，
+  // 全按 lod 0 采会闪（本来该走 mip 的那点缩小被跳过，草丛和蝴蝶边缘会跳）。
+  vec2 assetUv = (board - uArt.xy) / uArt.zw;
+  float assetBias = exp2(uAssetLod + sweepLod);
+  vec2 assetDx = dFdx(assetUv) * assetBias;
+  vec2 assetDy = dFdy(assetUv) * assetBias;
+  vec4 asset = textureGrad(uAsset, vec2(assetUv.x, 1.0 - assetUv.y), vec2(assetDx.x, -assetDx.y), vec2(assetDy.x, -assetDy.y));
 
-  // 三层光：screen 叠加，位置各自跟着指针漂移
-  for (int i = 0; i < 3; i++) {
-    vec2 d = (screenUv - uLightPos[i]) / uLightSize[i];
-    float alpha = clamp(1.0 - length(d) / 0.72, 0.0, 1.0);
-    color = 1.0 - (1.0 - color) * (1.0 - uLightColor[i] * alpha * uLightAmp[i]);
+  // 洞里才画场景。洞往外放一圈：素材的虚焦、屏幕洞里外那圈抗锯齿都会漫出来，
+  // 那圈像素得接着画画面，不然素材的透明边会把底色拉出一道灰边。
+  float grow = 1.0 + exp2(uAssetLod + sweepLod) * (uArt.z / ASSET_W) * 2.0;
+  vec2 holePx = board - uHole.xy;
+  bool insideHole = holePx.x > -grow && holePx.y > -grow && holePx.x < uHole.z + grow && holePx.y < uHole.w + grow;
+
+  vec3 color = uDesk;
+  if (insideHole) {
+    vec2 frameUv = holePx / uHole.zw;
+
+    // 镜头：越靠边越往屏幕中心取采样（等于把四周向外拉伸），并叠加失焦。
+    // 半径按屏幕（洞）归一：屏幕上那圈畸变与失焦才是照着屏幕边来的。
+    float aspect = uHole.z / uHole.w;
+    vec2 centered = (frameUv - 0.5) * vec2(aspect, 1.0);
+    float radius = clamp(length(centered) / (0.5 * length(vec2(aspect, 1.0))), 0.0, 1.0);
+    float edge = smoothstep(0.25, 1.0, radius);
+    vec2 warpedUv = frameUv - (frameUv - 0.5) * (0.18 * uLens * edge);
+
+    color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge + sweepPx);
+
+    // 三层光：screen 叠加，位置各自跟着指针漂移
+    for (int i = 0; i < 3; i++) {
+      vec2 d = (frameUv - uLightPos[i]) / uLightSize[i];
+      float alpha = clamp(1.0 - length(d) / 0.72, 0.0, 1.0);
+      color = 1.0 - (1.0 - color) * (1.0 - uLightColor[i] * alpha * uLightAmp[i]);
+    }
   }
 
-  outColor = vec4(color, 1.0);
+  // 素材按自己的 alpha 压上去：屏幕洞里 alpha = 0，于是洞里就是刚画好的画面——
+  // 素材再怎么透明也挡不住它。uAssetAlpha 只管「显不显形」，两者各管各的。
+  outColor = vec4(mix(color, asset.rgb, asset.a * uAssetAlpha), 1.0);
 }`;
 
 const DUST_VERT = `#version 300 es
 in vec2 aPos;
 in float aSeed;
+uniform vec2 uRes;           // 版面（画布）CSS 像素
+uniform vec4 uHole;          // 屏幕洞在版面里的矩形
+uniform float uBoardScale;   // 素材放大倍数（支点 = 洞心）：粒子和屏幕一起放，于是始终待在屏幕里
 uniform vec2 uLightPos[3];
 uniform vec2 uLightSize[3];
 uniform float uLightAmp[3];
-uniform vec2 uBoxScale;
 uniform float uDust;
 out float vBright;
 void main() {
-  // aPos 是版面 uv（和光的位置同一套坐标），换算成画布 uv 再画：只画在视口里那块版面上
-  vec2 p = 0.5 + (aPos - 0.5) * uBoxScale;
+  // aPos 是屏幕洞内的 uv（和光的位置同一套坐标）：先摆回版面，再按素材那一路放大，最后归到画布 uv。
+  // 起手放大到 5 倍多时，粒子跟着铺满整屏——它们本来就该在屏幕里，而不是钉在屏幕上不动。
+  vec2 center = uHole.xy + uHole.zw * 0.5;
+  vec2 boardPx = uHole.xy + aPos * uHole.zw;
+  vec2 p = (center + (boardPx - center) * uBoardScale) / uRes;
   float light = 0.0;
   for (int i = 0; i < 3; i++) {
-    vec2 d = (p - uLightPos[i]) / uLightSize[i];
+    vec2 d = (aPos - uLightPos[i]) / uLightSize[i];
     light += clamp(1.0 - length(d) / 0.8, 0.0, 1.0) * uLightAmp[i];
   }
   // 光越足越亮；出了光就干脆不亮，不要整屏撒白点。
@@ -230,7 +282,40 @@ function bezier(p1x: number, p1y: number, p2x: number, p2y: number) {
   };
 }
 
-export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
+/**
+ * 首屏动画只改这个对象：GSAP 写、SceneCanvas 每帧读（普通对象，不走 React state，
+ * 省掉每帧一次重渲染）。三个字段各管一件事，见 hero-scene.tsx。
+ */
+export type HeroState = {
+  /** 素材放大倍数（支点 = 屏幕洞心）：起手放到洞盖满整屏，滚完回到 1 */
+  scale: number;
+  /** 素材整体不透明度（0..1）：滚过开头那一小段就一直是 1 */
+  opacity: number;
+  /** 素材虚焦（px）：从 BLUR 收到 0，素材是「先带糊压上来、再对焦」的 */
+  blur: number;
+  /**
+   * 纸张板块（首屏之后那块）在文档里的 y（px）：滚动模糊那条带子要贴着它的上沿。
+   * 由 hero-scene.tsx 从 ScrollTrigger 的 end 拿（钉住补出来的那截占位也算在里面），
+   * 拿不到时它给的是首屏高度。别在这里推「一屏 + 一屏」——减少动态效果时没有钉住。
+   */
+  paperTop: number;
+};
+
+export function SceneCanvas({
+  src,
+  poster,
+  asset,
+  state,
+}: {
+  /** 视频（画面本体） */
+  src: string;
+  /** 视频首帧，解码前先顶上 */
+  poster: string;
+  /** PC 素材（显示器 + 草地），屏幕那块洞是全透明的 */
+  asset: string;
+  /** 滚动动画写的状态，每帧读 */
+  state: HeroState;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -283,6 +368,33 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
+    // 素材：屏幕那块洞是全透明的，洞里由着色器自己画画面（见 FRAG）。带 mipmap 是因为
+    // 「显形虚焦」直接挑一层 mip 就够——比每帧多做几趟模糊采样便宜得多，糊得也干净。
+    const assetTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, assetTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    let assetUp = false;
+    const assetImage = new Image();
+    assetImage.decoding = "async";
+    assetImage.onload = () => {
+      gl.bindTexture(gl.TEXTURE_2D, assetTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, assetImage);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      // 换素材（重新导出）时比例会对不上：几何是照 ART_RATIO 算的，对不上整套就错位。
+      // 不拦着，只报一声——要改的是 lib/hero-screen.ts 里的常量与尺寸量法。
+      const ratio = assetImage.naturalWidth / assetImage.naturalHeight;
+      if (Math.abs(ratio - ART_RATIO) > 0.01) {
+        console.warn(
+          `[scene-canvas] ${asset} 的宽高比 ${ratio.toFixed(4)} 与 ART_RATIO ${ART_RATIO.toFixed(4)} 不一致，几何要重新对一遍（lib/hero-screen.ts）`,
+        );
+      }
+      assetUp = true;
+    };
+    assetImage.src = asset;
+
     // —— 着色器里的固定表
     // 位置只查一次：每帧再 getUniformLocation/getAttribLocation 都是同步 GL 调用，白花时间
     const sceneLoc = {
@@ -304,25 +416,39 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       lightPos: gl.getUniformLocation(scene, "uLightPos"),
       lightSize: gl.getUniformLocation(scene, "uLightSize"),
       lightAmp: gl.getUniformLocation(scene, "uLightAmp"),
-      boxScale: gl.getUniformLocation(scene, "uBoxScale"),
+      asset: gl.getUniformLocation(scene, "uAsset"),
+      art: gl.getUniformLocation(scene, "uArt"),
+      hole: gl.getUniformLocation(scene, "uHole"),
+      boardScale: gl.getUniformLocation(scene, "uBoardScale"),
+      assetAlpha: gl.getUniformLocation(scene, "uAssetAlpha"),
+      assetLod: gl.getUniformLocation(scene, "uAssetLod"),
+      desk: gl.getUniformLocation(scene, "uDesk"),
     };
     const dustPosAttr = gl.getAttribLocation(dustProgram, "aPos");
     const dustSeedAttr = gl.getAttribLocation(dustProgram, "aSeed");
     const dustLoc = {
+      res: gl.getUniformLocation(dustProgram, "uRes"),
+      hole: gl.getUniformLocation(dustProgram, "uHole"),
+      boardScale: gl.getUniformLocation(dustProgram, "uBoardScale"),
       lightPos: gl.getUniformLocation(dustProgram, "uLightPos"),
       lightSize: gl.getUniformLocation(dustProgram, "uLightSize"),
       lightAmp: gl.getUniformLocation(dustProgram, "uLightAmp"),
-      boxScale: gl.getUniformLocation(dustProgram, "uBoxScale"),
       dust: gl.getUniformLocation(dustProgram, "uDust"),
     };
 
     const lightColors = new Float32Array(LIGHTS.flatMap((l) => toRgb(l.color)));
     const lightAmps = new Float32Array(LIGHTS.map((l) => Number(l.color.match(/\/\s*([\d.]+)%/)?.[1] ?? 30) / 100));
-    // 光的尺寸（uv 半轴）在 resize() 里按版面占画布的比例换算到画布坐标，所以这份是运行时值
+    // 光的位置/尺寸、粒子位置原本都按「版面」（首屏那一屏）调过，现在这块画布就是版面，
+    // 谁也不换算——它们于是实打实配在屏幕上，画面是真适配屏幕，而不是从大画面里裁一块塞进去
     const lightSizesUv = new Float32Array(LIGHTS.flatMap((l) => [...l.size]));
     const lightPosUv = new Float32Array(6);
-    /** 画布与「版面」的换算比：现在画布就是屏幕那块，恒等 */
-    const boxScale = new Float32Array([1, 1]);
+    // 素材还没显形时，素材背后那层底色（网页台面）——从 CSS 令牌取，别写死第二份
+    const deskRgb = toRgb(
+      getComputedStyle(document.documentElement).getPropertyValue("--desk").trim() || "oklch(0.379 0.074 44.5)",
+    );
+    /** 素材与屏幕洞在版面里的矩形（px）：版面一变就重新量，见 lib/hero-screen.ts */
+    const artRect = new Float32Array(4);
+    const holeRect = new Float32Array(4);
 
     // —— CSS 令牌
     const blurPx = cssNumber("--lens-blur", 9);
@@ -364,33 +490,32 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
     const resize = () => {
       // 画布按 1:1 设备像素画：内容本身是 1280 宽的视频，放大到高 DPR 看不出差别，
       // 却要按面积多花几倍填充率（软件光栅化时尤其明显）。
-      // 尺寸取自容器而不是视口：容器就是屏幕那一块画面（hero-scene.tsx 按素材里的屏幕洞量出来），
-      // 场景才跟着屏幕走。
-      // 用 offsetWidth/Height（排版尺寸）而不是 getBoundingClientRect()：外层把它缩进屏幕里时，
-      // 变换后的 rect 是缩过的，画布连同着色器里的 res 都会被量小，画面糊掉。
-      // 排版尺寸不受祖先 transform 影响，画布始终按「放到最大那一档」在画（见 landing().w），
-      // 缩下去只是被显示得小。
+      // 用 offsetWidth/Height（排版尺寸）而不是 getBoundingClientRect()：这一层在别处
+      // 可能被祖先的 transform 缩过，变换后的 rect 是缩过的，画布连同着色器里的 res
+      // 都会被量小、画面糊掉；排版尺寸不受祖先 transform 影响。
       const dpr = 1;
       width = host.offsetWidth;
       height = host.offsetHeight;
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
-      // 画布就是屏幕那一块（见 hero-scene.tsx）：光的位置/尺寸、粒子位置、镜头半径原本都按
-      // 「版面」（首屏那一屏）调过，现在整块画布都在屏幕里，一比一换算即可——它们于是就配在
-      // 屏幕这个框里，画面是真的适配屏幕，而不是从一块大画面里裁一块塞进去。
-      boxScale[0] = 1;
-      boxScale[1] = 1;
-      for (let i = 0; i < LIGHTS.length; i++) {
-        lightSizesUv[i * 2] = LIGHTS[i].size[0] * boxScale[0];
-        lightSizesUv[i * 2 + 1] = LIGHTS[i].size[1] * boxScale[1];
-      }
+      // 素材按 cover 铺满整块画布，屏幕洞的位置与大小跟着素材走。着色器里的逆映射、
+      // GSAP 那边的起手倍数都取自同一份几何（lib/hero-screen.ts），不会各算一套。
+      const geom = heroGeometry(width, height);
+      artRect.set([geom.art.x, geom.art.y, geom.art.w, geom.art.h]);
+      holeRect.set([
+        geom.hole.cx - geom.hole.w / 2,
+        geom.hole.cy - geom.hole.h / 2,
+        geom.hole.w,
+        geom.hole.h,
+      ]);
       // 版面上的「一屏」高度（占位层是 100vh）：滚动模糊的进度按它算，不按 window.innerHeight——
       // 手机上滚起来地址栏会收，innerHeight 会跳一次，模糊就不该跟着跳。它只在版面变的时候才变，
       // 所以搭在这里量一次就够。
       screenH = host.closest(".hero-scene")?.clientHeight ?? window.innerHeight;
+      // 点击定点缩放的起手支点 = 屏幕洞心：第一次量到几何时落在那儿，之后只跟着动画走
       if (!pivotX && !pivotY) {
-        pivotX = pivotFromX = pivotToX = width / 2;
-        pivotY = pivotFromY = pivotToY = height / 2;
+        pivotX = pivotFromX = pivotToX = geom.hole.cx;
+        pivotY = pivotFromY = pivotToY = geom.hole.cy;
       }
     };
 
@@ -399,21 +524,24 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
      * 两端都夹好之后再让支点在两者之间线性走也不会越界：上界随 z 单调递减、
      * 下界随 z 单调递增，缩放往回走时可行区间只会变宽。
      * 另外留出视差幅度当余量，免得动画途中鼠标一动就把采样推出画面外。
+     * 尺寸都按屏幕（洞）来——画面是铺在洞里的，露底与否只看洞那点面积。
      */
     const clampPivot = (x: number, y: number, z: number) => {
       const vw = video.videoWidth || 16;
       const vh = video.videoHeight || 9;
-      const cover = Math.max(width / vw, height / vh);
+      const holeW = holeRect[2] || width;
+      const holeH = holeRect[3] || height;
+      const cover = Math.max(holeW / vw, holeH / vh);
       const dw = vw * cover;
       const dh = vh * cover;
-      const ox = (width - dw) / 2 - photoCurrent[0];
-      const oy = (height - dh) / 2 - photoCurrent[1];
+      const ox = (holeW - dw) / 2 - photoCurrent[0];
+      const oy = (holeH - dh) / 2 - photoCurrent[1];
       const mx = PHOTO_PARALLAX.range[0];
       const my = PHOTO_PARALLAX.range[1];
       const k = z / (z - 1);
       return {
-        x: Math.min((ox + dw - width / z - mx) * k, Math.max((ox + mx) * k, x)),
-        y: Math.min((oy + dh - height / z - my) * k, Math.max((oy + my) * k, y)),
+        x: Math.min((ox + dw - holeW / z - mx) * k, Math.max((ox + mx) * k, x)),
+        y: Math.min((oy + dh - holeH / z - my) * k, Math.max((oy + my) * k, y)),
       };
     };
 
@@ -506,13 +634,21 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       for (let i = 0; i < LIGHTS.length; i++) {
         lightCurrent[i][0] += (lightTarget[i][0] - lightCurrent[i][0]) * LIGHTS[i].ease;
         lightCurrent[i][1] += (lightTarget[i][1] - lightCurrent[i][1]) * LIGHTS[i].ease;
-        // origin 与漂移都是版面比例，换算到画布坐标再传（画布比版面宽出来的部分不参与）
-        lightPosUv[i * 2] = 0.5 + (LIGHTS[i].origin[0] + lightCurrent[i][0] - 0.5) * boxScale[0];
-        lightPosUv[i * 2 + 1] = 0.5 + (LIGHTS[i].origin[1] + lightCurrent[i][1] - 0.5) * boxScale[1];
+        // origin 与漂移都是屏幕（洞）内的比例，光就配在屏幕上
+        lightPosUv[i * 2] = LIGHTS[i].origin[0] + lightCurrent[i][0];
+        lightPosUv[i * 2 + 1] = LIGHTS[i].origin[1] + lightCurrent[i][1];
       }
+
+      // 滚动动画写的三个数（普通对象，GSAP 每帧改）。素材还没解码完就先当它没显形：
+      // 不全的黑图会糊住底下那块画面，等图到了再交给它。
+      const boardScale = Math.max(state.scale, 1e-3);
+      const assetAlpha = assetUp ? state.opacity : 0;
+      const assetLod = Math.log2(1 + Math.max(0, state.blur));
 
       // 24fps 的视频配 60fps 的循环：同一帧不必反复上传（每帧一次 3.7MB 拷贝）
       if (video.readyState >= 2 && video.currentTime !== uploadedTime) {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
         uploadedTime = video.currentTime;
       }
@@ -525,8 +661,11 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       gl.enableVertexAttribArray(quadPos);
       gl.vertexAttribPointer(quadPos, 2, gl.FLOAT, false, 0, 0);
       gl.uniform1i(sceneLoc.video, 0);
+      gl.uniform1i(sceneLoc.asset, 1);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, assetTexture);
       gl.uniform2f(sceneLoc.res, width, height);
       gl.uniform2f(sceneLoc.buffer, canvas.width, canvas.height);
       gl.uniform2f(sceneLoc.videoSize, video.videoWidth || 16, video.videoHeight || 9);
@@ -541,10 +680,17 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       // scale 是画面当前被缩到几分之一（含素材推近），rect 是变换后的框——减掉半高就是没缩过的顶边。
       const fit = rect.width / width;
       const canvasTop = rect.top + rect.height / 2 - (height * fit) / 2;
-      gl.uniform1f(sceneLoc.edgePx, (screenH - window.scrollY) / fit);
+      // 纸的上沿：滚动的模糊带要贴着它。取值见 HeroState.paperTop——钉住补出来的那截占位
+      // 也算在文档里，所以由 hero-scene 从 ScrollTrigger 的 end 拿，这里别自己推。
+      gl.uniform1f(sceneLoc.edgePx, (state.paperTop - window.scrollY) / fit);
       gl.uniform1f(sceneLoc.viewTop, canvasTop / fit);
       gl.uniform1f(sceneLoc.viewH, viewH / fit);
-      gl.uniform2fv(sceneLoc.boxScale, boxScale);
+      gl.uniform4fv(sceneLoc.art, artRect);
+      gl.uniform4fv(sceneLoc.hole, holeRect);
+      gl.uniform1f(sceneLoc.boardScale, boardScale);
+      gl.uniform1f(sceneLoc.assetAlpha, assetAlpha);
+      gl.uniform1f(sceneLoc.assetLod, assetLod);
+      gl.uniform3fv(sceneLoc.desk, deskRgb);
       gl.uniform3fv(sceneLoc.lightColor, lightColors);
       gl.uniform2fv(sceneLoc.lightPos, lightPosUv);
       gl.uniform2fv(sceneLoc.lightSize, lightSizesUv);
@@ -580,7 +726,9 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
         gl.uniform2fv(dustLoc.lightPos, lightPosUv);
         gl.uniform2fv(dustLoc.lightSize, lightSizesUv);
         gl.uniform1fv(dustLoc.lightAmp, lightAmps);
-        gl.uniform2fv(dustLoc.boxScale, boxScale);
+        gl.uniform2f(dustLoc.res, width, height);
+        gl.uniform4fv(dustLoc.hole, holeRect);
+        gl.uniform1f(dustLoc.boardScale, boardScale);
         gl.uniform1f(dustLoc.dust, DUST_AMOUNT * (0.7 + 0.3 * lens));
         gl.drawArrays(gl.POINTS, 0, DUST_COUNT);
       }
@@ -602,13 +750,14 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       host.removeEventListener("click", onClick);
       host.removeEventListener("pointermove", onPointerMove);
       gl.deleteTexture(texture);
+      gl.deleteTexture(assetTexture);
       gl.deleteBuffer(quad);
       gl.deleteBuffer(dustPosBuffer);
       gl.deleteBuffer(dustSeedBuffer);
       gl.deleteProgram(scene);
       gl.deleteProgram(dustProgram);
     };
-  }, [src]);
+  }, [src, asset, state]);
 
   return (
     <div ref={hostRef} className="absolute inset-0">

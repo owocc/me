@@ -250,10 +250,12 @@
   }
 
   /*
-   * 首屏里那层会动的画布：框住「画面 + 素材」这一组，自己不动（动的是里面的板子）。
-   * 高度 = 一屏 + 底下的 --hero-bleed：多出来的那一截铺到纸张撕口底下，
+   * 首屏里那层画布：高度 = 一屏 + 底下的 --hero-bleed，多出来的那一截铺到纸张撕口底下，
    * 这样纸从下面盖上来时，撕口里透出来的始终是画面，不会露出网页底色。
    * 注意定位是 absolute：这一层不占版面，多出去的一截也不会把页面撑高。
+   * 视频、场景、PC 素材全在这一块画布里一趟画完（见 scene-canvas.tsx）——
+   * 素材的屏幕洞、洞里的画面、素材自己的放大/显形/虚焦都在着色器里按同一套坐标算，
+   * 所以这里不再有「板子 / 屏幕 / 素材」那几层 DOM，也就没有谁缩到谁外面去的可能。
    */
   .hero-canvas {
     position: absolute;
@@ -261,67 +263,6 @@
     left: 0;
     width: 100%;
     height: calc(100% + var(--hero-bleed));
-    /* 画面那块 16:9 比版面宽，多出来的部分按设计就看不见——横向裁掉，别让它把文档撑宽
-       （撑宽了整页就能横向滚，页面会莫名左移）。只裁横向：底下那截 --hero-bleed 得留着，
-       它是给纸张撕口透出画面用的。 */
-    overflow-x: clip;
-  }
-
-  /*
-   * 「画面 + 素材」这一组：起手推得很大（屏幕盖满整屏），滚动时整体缩回原大小，
-   * 支点由 GSAP 设在屏幕中心（见 hero-scene.tsx）。
-   * 挂上 will-change：起手那一下放到 4–5 倍，不合成的话浏览器会照放大后的尺寸重新栅格化，
-   * 白烧一遍大图；合成之后交给 GPU 缩放，缩回来的过程也更稳。
-   */
-  .hero-board {
-    position: absolute;
-    inset: 0;
-    will-change: transform;
-  }
-
-  /*
-   * 画面这一层：GSAP 在它上面摆位（整块摆到素材的屏幕洞上，缩多少由素材的放大倍数定，
-   * 见 hero-scene.tsx 的 place()），是个定值、只跟版面走，不跟滚动走。
-   * 它自己不带任何 transform——GSAP 写的 matrix 要是撞上 CSS 的 translate 属性，
-   * 两者会互相吃掉：实测 Chrome 会把 translate 折进计算后的 transform 里，
-   * GSAP 读到的基线就带了半个位移，最后落点只在 x 上对、y 上差半个元素高。
-   */
-  .hero-shot {
-    position: absolute;
-    z-index: 0;
-    inset: 0;
-  }
-
-  /*
-   * 屏幕那一块画面：宽高由 GSAP 按素材里的屏幕洞算好写上（见 hero-scene.tsx 的 place()），
-   * 这里只兜底一个没 JS 时的尺寸与形状——就是屏幕的形状（洞口 358×257），
-   * 于是里面那层画布（视频 + 场景）按屏幕的框来画，画面是真配在屏幕上，不是裁一块塞进去。
-   * 居中用 50% + translate，且只压在这块元素上：GSAP 动的是外面那层，CSS 的 translate 与
-   * transform 各归各的，谁也拆不掉谁；没 JS 的时候它也照常居中（外层的 transform 本来就是单位阵）。
-   */
-  .hero-shot-picture {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    translate: -50% -50%;
-    width: 100%;
-    aspect-ratio: 358 / 257;
-  }
-
-  /*
-   * PC 素材：铺满版面（cover），画面正中那块屏幕是透明洞，洞里透出来的就是底下那块画面。
-   * 起手是藏着的（透明 + 一层虚焦），随滚动缩回原大小时一边显形、一边对焦（起手状态与动画
-   * 都在 hero-scene.tsx 里给，这里只管版式）——所以首屏看到的只有画面，显示器是化出来的。
-   * 不吃指针事件：首屏的点击定点缩放仍然归底下那块画面管，别被这层挡住。
-   */
-  .hero-pc {
-    position: absolute;
-    z-index: 1;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    pointer-events: none;
   }
 }
 
