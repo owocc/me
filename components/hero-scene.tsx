@@ -2,13 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import gsap from "gsap";
-import { ScrollTrigger } from "gsap/ScrollTrigger";
 
 import { SceneCanvas, type HeroState } from "@/components/scene-canvas";
 import { heroGeometry, hitsScreenHole } from "@/lib/hero-screen";
 import { ACTIVE_HERO_VIDEO, HERO_PC_ASSET, HERO_VIDEOS } from "@/lib/hero-media";
-
-gsap.registerPlugin(ScrollTrigger);
 
 /**
  * 素材起手那层虚焦（px）。它先带糊压上来、再慢慢对焦，所以中段看得见「糊着的显示器」——
@@ -45,10 +42,8 @@ function useIsMobile() {
  * 首屏：一整屏（100vh × 满宽）的场景，作为页面的第一个板块，不铺到整页。
  *
  * 只有两层：
- *   · 外面 `.hero-scene` 是版面占位——高度钉死一屏（100vh），也不跟着滚轮动，
- *     页面高度和纸张的起点因此永远是定的；vh 不随地址栏收放变化，滚全程量到的都是同一个数。
- *     这块同时是 ScrollTrigger 钉住（pin）的那一块：整段动画期间它定在视口里，
- *     滚轮只推着动画走，动画走完才放开、页面继续往下滚，后面的纸这时才开始上来盖场；
+ *   · 外面 `.hero-scene` 是版面占位——高度钉死一屏（100vh），页面高度和纸张的起点因此永远是定的；
+ *     vh 不随地址栏收放变化，滚全程量到的都是同一个数；
  *   · 里面 `.hero-canvas`（一屏 + 底下的 --hero-bleed，多出来那截铺到纸张撕口底下）
  *     就是一整块画布：视频、光、粒子、镜头与 PC 素材都在着色器里一趟画完（见 scene-canvas.tsx）。
  *     素材里的屏幕洞、洞里的画面、素材自己的放大/显形/虚焦全是这一趟里的采样，
@@ -57,8 +52,13 @@ function useIsMobile() {
  * 动画只改一个普通对象（state）：GSAP 直接改它的字段，SceneCanvas 每帧读，
  * 不过 React state——省掉每帧一次重渲染。
  *
- * 手机那一档（{@link MOBILE}）另走一条路：不缩放、不钉住，起手就把显示器与画面一起摆好
- * （state 直接落在终态），滚轮直接往下走。桌面端才做「显示器从画外化出来」那一套。
+ * 双击画面放大到满屏期间，页面是**钉住**的（见 isPinned / handleScroll）：不管滚动来自滚轮、
+ * 触屏、键盘还是拖动滚动条，都先把页面按回顶部、并触发收起动画，动画播完才放行。
+ * 钉住不是靠 ScrollTrigger，就是这里手写的——页面真滚起来的话，满屏的画面会直接滚出屏幕，
+ * 收起动画在看不见的地方播完，回来时状态还停在「已展开」，等于坏在半路。
+ *
+ * 手机那一档（{@link MOBILE}）另走一条路：不缩放、不起手放大，显示器与画面一起摆好
+ * （state 直接落在终态），滚轮直接往下走。桌面端才做「双击放大」那一套。
  *
  * 屏幕里的画面现在是**数组**：段与顺序都在 lib/hero-media.ts 里，往里加项、改
  * ACTIVE_HERO_VIDEO（或把 activeVideo 接成状态）就能多段切换，着色器、几何、
@@ -90,6 +90,12 @@ export function HeroScene() {
     state.blur = 0;
 
     const getGrow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
+
+    /**
+     * 页面该不该被钉在顶部：放大动画期间、已展开、收起动画期间，都算。
+     * 收起动画期间也得钉住——那时 isExpandedRef 还是 true，正好一起盖住。
+     */
+    const isPinned = () => isExpandedRef.current || isAnimatingRef.current;
 
     // 双击放大到全屏：屏幕内播放的内容平滑放大至占满视口
     // 动画过程中，到达 80% 进度后开始平滑降低素材透明度（fade out），最后完全隐藏
@@ -183,6 +189,23 @@ export function HeroScene() {
       );
     };
 
+    /**
+     * 真实滚动是唯一可靠的口径：不管滚动来自拖动滚动条、键盘、中键自动滚动还是别的什么，
+     * 只要页面真的动了，这里都会收到——而 wheel / touchmove 只盖得住滚轮和手指。
+     *
+     * 以前只拦了 wheel 与 touchmove，于是拖动滚动条绕了过去：页面真的滚、满屏的画面跟着出屏，
+     * 收起却始终没被触发，回来时状态还停在「已展开」。现在以真实滚动为准：
+     * 页面一离开顶部就先按回顶部（钉住，让收起动画留在视野里），并照常触发收起；
+     * 收起一结束 isPinned() 变 false，这个回调立刻不再插手，用户接着滚就正常往下走。
+     */
+    const handleScroll = () => {
+      if (!isPinned()) return;
+      if (window.scrollY === 0) return;
+      window.scrollTo(0, 0);
+      // 收起动画自己会钉住（isPinned 仍为 true），这里的重复触发由 collapseToNormal 挡掉
+      if (isExpandedRef.current && !isAnimatingRef.current) collapseToNormal();
+    };
+
     // 双击处理：改为 dblclick 事件触发全屏放大/收起
     // 单击则保留由 SceneCanvas 内部处理视频画面微观推近
     const handleDblClick = (e: MouseEvent) => {
@@ -216,24 +239,23 @@ export function HeroScene() {
         lastTapTime = now;
       }
     };
-    // 当处于放大状态（全屏）时，滚轮或滑动手势不直接让页面跑，而是先做虚拟滚动收起；
-    // 收起回到正常电脑后，再次滚动才放行页面正常下滚。
+    // 钉住期间页面一律不动：滚动量只用来决定收不收，不真的滚。
+    // 滚轮与触屏继续走「阻尼阈值」这一档（触控板惯性很大，一碰就收起会太敏感）；
+    // 键盘与拖动滚动条那种明确的大动作不走阻尼，见 handleKeyDown / handleScroll。
     const VIRTUAL_THRESHOLD = 80; // 虚拟滚动触发收起的阻尼阈值
 
     const handleWheel = (e: WheelEvent) => {
-      if (!isExpandedRef.current) return;
+      if (!isPinned()) return;
+      e.preventDefault();
+      // 放大动画期间只按住页面，不累加：那时还没展开，收起也无从收起
+      if (!isExpandedRef.current || isAnimatingRef.current) return;
 
-      // 处于放大全屏态
       if (e.deltaY > 0) {
-        // 往下滚：拦截页面真实滚动，累加虚拟滚动
-        e.preventDefault();
+        // 往下滚：累加虚拟滚动，够了就收起
         virtualScrollYRef.current += e.deltaY;
-        if (virtualScrollYRef.current >= VIRTUAL_THRESHOLD && !isAnimatingRef.current) {
-          collapseToNormal();
-        }
+        if (virtualScrollYRef.current >= VIRTUAL_THRESHOLD) collapseToNormal();
       } else if (e.deltaY < 0) {
         // 往上滚：减小虚拟滚动累加
-        e.preventDefault();
         virtualScrollYRef.current = Math.max(0, virtualScrollYRef.current + e.deltaY);
       }
     };
@@ -244,17 +266,31 @@ export function HeroScene() {
       touchStartY = e.touches[0].clientY;
     };
     const handleTouchMove = (e: TouchEvent) => {
-      if (!isExpandedRef.current) return;
+      // 两根手指多半是要捏合缩放，别拦
+      if (!isPinned() || e.touches.length !== 1) return;
       const currentY = e.touches[0].clientY;
       const diff = touchStartY - currentY; // 正值表示向上滑动（页面想要往下滚）
-      if (diff > 0) {
-        e.preventDefault();
-        virtualScrollYRef.current += diff;
-        touchStartY = currentY;
-        if (virtualScrollYRef.current >= VIRTUAL_THRESHOLD && !isAnimatingRef.current) {
-          collapseToNormal();
-        }
-      }
+      if (diff <= 0) return;
+      e.preventDefault();
+      touchStartY = currentY;
+      if (!isExpandedRef.current || isAnimatingRef.current) return;
+      virtualScrollYRef.current += diff;
+      if (virtualScrollYRef.current >= VIRTUAL_THRESHOLD) collapseToNormal();
+    };
+
+    /**
+     * 键盘滚动（空格 / PageDown / 方向键 / Home / End）既不经过 wheel 也不经过 touchmove，
+     * 钉住期间得单独拦：不拦的话页面会先跳一屏，再被 handleScroll 按回来——白闪一下。
+     * 这类按键是明确的大动作，不走阻尼阈值，按一下就收起。
+     */
+    const SCROLL_KEYS = new Set([" ", "Spacebar", "PageDown", "PageUp", "ArrowDown", "ArrowUp", "Home", "End"]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isPinned() || !SCROLL_KEYS.has(e.key)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as Element | null;
+      if (target?.closest("input, textarea, select, [contenteditable]")) return;
+      e.preventDefault();
+      if (isExpandedRef.current && !isAnimatingRef.current) collapseToNormal();
     };
 
     // 窗口尺寸变化时，保持比例正确
@@ -268,6 +304,8 @@ export function HeroScene() {
 
     screen.addEventListener("dblclick", handleDblClick);
     window.addEventListener("wheel", handleWheel, { passive: false });
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("touchstart", handleTouchStart, { passive: true });
     window.addEventListener("touchmove", handleTouchMove, { passive: false });
     window.addEventListener("touchend", handleTouchEnd, { passive: true });
@@ -276,6 +314,8 @@ export function HeroScene() {
     return () => {
       screen.removeEventListener("dblclick", handleDblClick);
       window.removeEventListener("wheel", handleWheel);
+      window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("touchstart", handleTouchStart);
       window.removeEventListener("touchmove", handleTouchMove);
       window.removeEventListener("touchend", handleTouchEnd);
