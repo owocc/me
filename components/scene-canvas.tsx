@@ -525,10 +525,11 @@ export function SceneCanvas({
       // 桌面绕屏幕中心（= 洞心，缩放不动的那个点），手机绕画布中心
       zoomAnchor[0] = anchorMode === "canvas" ? width / 2 : geom.hole.cx;
       zoomAnchor[1] = anchorMode === "canvas" ? height / 2 : geom.hole.cy;
-      // 点击定点缩放的起手支点 = 屏幕洞心：第一次量到几何时落在那儿，之后只跟着动画走
+      // 点击定点缩放的起手支点 = 窗口中心。注意支点用的是着色器里那套坐标（窗口内的 px），
+      // 不是版面 px——版面里那一套大得多，直接塞进去支点会落在画面外面。
       if (!pivotX && !pivotY) {
-        pivotX = pivotFromX = pivotToX = geom.hole.cx;
-        pivotY = pivotFromY = pivotToY = geom.hole.cy;
+        pivotX = pivotFromX = pivotToX = geom.hole.w / 2;
+        pivotY = pivotFromY = pivotToY = geom.hole.h / 2;
       }
     };
 
@@ -556,13 +557,16 @@ export function SceneCanvas({
       pivotFromX = pivotX;
       pivotFromY = pivotY;
       if (goingIn) {
-        // 点击坐标是视口的，画布的支点是容器内的：减去容器左上角，往下滚过也不会错位
+        // 点击坐标 → 着色器那套坐标：先减容器左上角得到画布 px，再按当前放大倍数退回版面坐标
+        // （绕 uZoomAnchor），最后减掉窗口原点。少了任何一步，放大时点哪儿支点都不对。
         const rect = host.getBoundingClientRect();
-        pivotToX = event.clientX - rect.left;
-        pivotToY = event.clientY - rect.top;
+        const k = Math.max(state.scale, 1e-3);
+        pivotToX = zoomAnchor[0] + (event.clientX - rect.left - zoomAnchor[0]) / k - holeRect[0];
+        pivotToY = zoomAnchor[1] + (event.clientY - rect.top - zoomAnchor[1]) / k - holeRect[1];
       } else {
-        pivotToX = width / 2;
-        pivotToY = height / 2;
+        // 退回时滑回画面中心（同样是窗口内那套坐标）
+        pivotToX = holeRect[2] / 2;
+        pivotToY = holeRect[3] / 2;
       }
       lensTarget = goingIn ? 1 : 0;
     };
@@ -662,7 +666,13 @@ export function SceneCanvas({
       gl.uniform2f(sceneLoc.res, width, height);
       gl.uniform2f(sceneLoc.buffer, canvas.width, canvas.height);
       gl.uniform2f(sceneLoc.videoSize, video.videoWidth || 16, video.videoHeight || 9);
-      gl.uniform2f(sceneLoc.photoOffset, photoCurrent[0] * photoScale, photoCurrent[1] * photoScale);
+      // 视差也按当前放大倍数退回版面坐标：photoCurrent 记的是「屏幕上该走多少像素」，
+      // 不除以 boardScale 的话，起手那种放大了五倍的状态下画面会被推得满屏乱跑。
+      gl.uniform2f(
+        sceneLoc.photoOffset,
+        (photoCurrent[0] * photoScale) / boardScale,
+        (photoCurrent[1] * photoScale) / boardScale,
+      );
       gl.uniform1f(sceneLoc.zoom, zoom);
       gl.uniform2f(sceneLoc.pivot, pivotX, pivotY);
       gl.uniform1f(sceneLoc.lens, lens);
