@@ -29,12 +29,15 @@ import { ART_RATIO, heroGeometry } from "@/lib/hero-screen";
  *   · 容器整块滚出视野就停画（视频也一起暂停），看不见的场景不该一直烧 CPU。
  */
 
-/** 三层光。origin/size/range 都是版面（首屏那一屏）比例，和原来 CSS 里的写法一一对应。 */
+/**
+ * 光晕。origin/size/range 都是版面（首屏那一屏）比例，和原来 CSS 里的写法一一对应。
+ * 原先叠了三层（暖橙 / 红 / 粉），放大态下三块糊在一起，看着发晕，砍到只留最主的那一层暖光。
+ * 数量由数组长度决定，着色器那边按它生成数组尺寸与循环次数，改数量不用再同步一处。
+ */
 const LIGHTS = [
   { color: "oklch(0.9 0.16 62 / 34%)", origin: [0.02, -0.1], size: [0.78, 0.7], range: [9, 7], ease: 0.055 },
-  { color: "oklch(0.86 0.19 28 / 32%)", origin: [0.12, -0.04], size: [0.6, 0.56], range: [16, 12], ease: 0.09 },
-  { color: "oklch(0.88 0.16 325 / 28%)", origin: [0.06, 0.06], size: [0.46, 0.42], range: [30, 22], ease: 0.16 },
 ] as const;
+const LIGHT_COUNT = LIGHTS.length;
 
 /** 照片层视差：与光反向、幅度最小（越远的东西走得越反），单位是像素。 */
 const PHOTO_PARALLAX = { range: [18, 12], ease: 0.07, direction: -1 } as const;
@@ -70,10 +73,10 @@ uniform float uZoom;         // 点击定点缩放的倍数
 uniform vec2 uPivot;         // px（屏幕内坐标）
 uniform float uLens;         // 0..1
 uniform float uBlurPx;
-uniform vec3 uLightColor[3];
-uniform vec2 uLightPos[3];   // uv（屏幕内）
-uniform vec2 uLightSize[3];  // uv 半轴
-uniform float uLightAmp[3];
+uniform vec3 uLightColor[${LIGHT_COUNT}];
+uniform vec2 uLightPos[${LIGHT_COUNT}];   // uv（屏幕内）
+uniform vec2 uLightSize[${LIGHT_COUNT}];  // uv 半轴
+uniform float uLightAmp[${LIGHT_COUNT}];
 // 素材与屏幕洞：都是版面 px 的矩形（x, y, w, h），见 lib/hero-screen.ts。
 // 素材整块在这里摆：uBoardScale 是它当前放大多少倍（支点 = 洞心），洞与洞里的画面跟着一起放。
 // 三样共用一套坐标，缩放于是只是改了采样——没有 DOM 边界可露。
@@ -158,8 +161,8 @@ void main() {
 
     color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge);
 
-    // 三层光：screen 叠加，位置各自跟着指针漂移
-    for (int i = 0; i < 3; i++) {
+    // 光晕：screen 叠加，位置跟着指针漂移
+    for (int i = 0; i < ${LIGHT_COUNT}; i++) {
       vec2 d = (frameUv - uLightPos[i]) / uLightSize[i];
       float alpha = clamp(1.0 - length(d) / 0.72, 0.0, 1.0);
       color = 1.0 - (1.0 - color) * (1.0 - uLightColor[i] * alpha * uLightAmp[i]);
@@ -178,9 +181,9 @@ uniform vec2 uRes;           // 版面（画布）CSS 像素
 uniform vec4 uHole;          // 屏幕洞在版面里的矩形
 uniform float uBoardScale;   // 版面放大倍数：粒子和屏幕一起放，于是始终待在屏幕里
 uniform vec2 uZoomAnchor;    // 缩放支点（版面 px）：与 FRAG 用同一个
-uniform vec2 uLightPos[3];
-uniform vec2 uLightSize[3];
-uniform float uLightAmp[3];
+uniform vec2 uLightPos[${LIGHT_COUNT}];
+uniform vec2 uLightSize[${LIGHT_COUNT}];
+uniform float uLightAmp[${LIGHT_COUNT}];
 uniform float uDust;
 out float vBright;
 out vec2 vBoard;             // 粒子在版面坐标里的位置（px）：碎片着色器拿它查素材的 alpha
@@ -191,7 +194,7 @@ void main() {
   vec2 p = (uZoomAnchor + (boardPx - uZoomAnchor) * uBoardScale) / uRes;
   vBoard = boardPx;
   float light = 0.0;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < ${LIGHT_COUNT}; i++) {
     vec2 d = (aPos - uLightPos[i]) / uLightSize[i];
     light += clamp(1.0 - length(d) / 0.8, 0.0, 1.0) * uLightAmp[i];
   }
@@ -453,7 +456,7 @@ export function SceneCanvas({
     // 光的位置/尺寸、粒子位置原本都按「版面」（首屏那一屏）调过，现在这块画布就是版面，
     // 谁也不换算——它们于是实打实配在屏幕上，画面是真适配屏幕，而不是从大画面里裁一块塞进去
     const lightSizesUv = new Float32Array(LIGHTS.flatMap((l) => [...l.size]));
-    const lightPosUv = new Float32Array(6);
+    const lightPosUv = new Float32Array(LIGHT_COUNT * 2);
     /** 素材与屏幕洞在版面里的矩形（px）：版面一变就重新量，见 lib/hero-screen.ts */
     const artRect = new Float32Array(4);
     const holeRect = new Float32Array(4);
