@@ -86,34 +86,64 @@ export function HeroScene() {
 
     const getGrow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
 
-    // 点击放大到全屏：屏幕内播放的内容平滑放大至占满视口
+    // 双击放大到全屏：屏幕内播放的内容平滑放大至占满视口
+    // 动画过程中，到达 80% 进度后开始平滑降低素材透明度（fade out），最后完全隐藏
     const expandToFullscreen = () => {
       if (isAnimatingRef.current || isExpandedRef.current) return;
       isAnimatingRef.current = true;
       virtualScrollYRef.current = 0;
 
       const targetScale = getGrow();
-      gsap.to(state, {
-        scale: targetScale,
+      const animObj = { progress: 0 };
+
+      gsap.to(animObj, {
+        progress: 1,
         duration: 0.85,
         ease: "power2.out",
+        onUpdate: () => {
+          const p = animObj.progress;
+          state.scale = baseScale + (targetScale - baseScale) * p;
+          // 到达 80% 进度后开始降低透明度，100% 时降为 0
+          if (p >= 0.8) {
+            state.opacity = Math.max(0, 1 - (p - 0.8) / 0.2);
+          } else {
+            state.opacity = 1;
+          }
+        },
         onComplete: () => {
+          state.scale = targetScale;
+          state.opacity = 0;
           isExpandedRef.current = true;
           isAnimatingRef.current = false;
         },
       });
     };
 
-    // 收起回正常电脑素材状态
+    // 双击或虚拟滚动收起回正常电脑素材状态
     const collapseToNormal = () => {
       if (isAnimatingRef.current || !isExpandedRef.current) return;
       isAnimatingRef.current = true;
 
-      gsap.to(state, {
-        scale: baseScale,
+      const startScale = state.scale;
+      const animObj = { progress: 0 };
+
+      gsap.to(animObj, {
+        progress: 1,
         duration: 0.75,
         ease: "power2.inOut",
+        onUpdate: () => {
+          const p = animObj.progress;
+          state.scale = startScale + (baseScale - startScale) * p;
+          // 从全屏收起：倒推回来，p < 0.2 时透明度从 0 升到 1（即还原到 80% 缩放位置时素材已完全不透明）
+          if (p <= 0.2) {
+            state.opacity = Math.min(1, p / 0.2);
+          } else {
+            state.opacity = 1;
+          }
+        },
         onComplete: () => {
+          state.scale = baseScale;
+          state.opacity = 1;
           isExpandedRef.current = false;
           isAnimatingRef.current = false;
           virtualScrollYRef.current = 0;
@@ -121,18 +151,36 @@ export function HeroScene() {
       });
     };
 
-    const handleClick = (e: MouseEvent) => {
+    // 双击处理：改为 dblclick 事件触发全屏放大/收起
+    // 单击则保留由 SceneCanvas 内部处理视频画面微观推近
+    const handleDblClick = (e: MouseEvent) => {
       const target = e.target as Element | null;
       if (target?.closest("a, button, input, textarea, select, [contenteditable]")) return;
       if (window.scrollY > 10) return;
       if (!isExpandedRef.current) {
         expandToFullscreen();
       } else {
-        // 再次点击也可平滑收起
         collapseToNormal();
       }
     };
-    // 虚拟滚动与手势拦截：
+
+    // 移动端模拟双击（两次快速点击 tap）
+    let lastTapTime = 0;
+    const handleTouchEnd = (e: TouchEvent) => {
+      if (window.scrollY > 10) return;
+      const now = performance.now();
+      if (now - lastTapTime < 300) {
+        // 触发双击
+        if (!isExpandedRef.current) {
+          expandToFullscreen();
+        } else {
+          collapseToNormal();
+        }
+        lastTapTime = 0;
+      } else {
+        lastTapTime = now;
+      }
+    };
     // 当处于放大状态（全屏）时，滚轮或滑动手势不直接让页面跑，而是先做虚拟滚动收起；
     // 收起回到正常电脑后，再次滚动才放行页面正常下滚。
     const VIRTUAL_THRESHOLD = 80; // 虚拟滚动触发收起的阻尼阈值
@@ -183,30 +231,31 @@ export function HeroScene() {
       }
     };
 
-    screen.addEventListener("click", handleClick);
+    screen.addEventListener("dblclick", handleDblClick);
     window.addEventListener("wheel", handleWheel, { passive: false });
     window.addEventListener("touchstart", handleTouchStart, { passive: true });
     window.addEventListener("touchmove", handleTouchMove, { passive: false });
+    window.addEventListener("touchend", handleTouchEnd, { passive: true });
     window.addEventListener("resize", handleResize);
 
     return () => {
-      screen.removeEventListener("click", handleClick);
+      screen.removeEventListener("dblclick", handleDblClick);
       window.removeEventListener("wheel", handleWheel);
       window.removeEventListener("touchstart", handleTouchStart);
       window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchend", handleTouchEnd);
       window.removeEventListener("resize", handleResize);
     };
   }, [state, mobile]);
 
   return (
-    <div ref={screenRef} aria-hidden className="hero-scene cursor-pointer">
+    <div ref={screenRef} aria-hidden className="hero-scene cursor-pointer select-none">
       <div ref={boxRef} className="hero-canvas">
         <SceneCanvas
           src="/bg-loop.mp4"
           poster="/bg-v1.webp"
           asset="/fly-pc_alpha.webm"
           zoomAnchor="screen"
-          disableClickZoom
           state={state}
         />
       </div>

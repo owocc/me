@@ -314,7 +314,6 @@ export function SceneCanvas({
   poster,
   asset,
   zoomAnchor: anchorMode,
-  disableClickZoom = false,
   state,
 }: {
   /** 视频（画面本体） */
@@ -327,8 +326,6 @@ export function SceneCanvas({
    * 缩放支点：`screen` = 绕屏幕（素材里那块玻璃）中心，`canvas` = 绕画布中心。
    */
   zoomAnchor: "screen" | "canvas";
-  /** 是否关闭画内的微观点击放大（由外部接管全屏放大交互） */
-  disableClickZoom?: boolean;
   /** 滚动/缩放状态，每帧读 */
   state: HeroState;
 }) {
@@ -501,6 +498,7 @@ export function SceneCanvas({
     let zoomFrom = baseZoom;
     let zoomTo = baseZoom;
     let zoomStart = 0;
+    let singleClickTimer: ReturnType<typeof setTimeout> | null = null;
     let pivotX = 0;                  // 当前生效的支点
     let pivotY = 0;
     let pivotFromX = 0;              // 本次动画的支点起点/终点
@@ -569,34 +567,51 @@ export function SceneCanvas({
       return 1 - (1 - SHRUNK_FOLLOW) * shrunk;
     };
 
-    const onClick = (event: MouseEvent) => {
-      if (disableClickZoom) return;
-      const target = event.target as Element | null;
-      if (target?.closest("a, button, input, textarea, select, [contenteditable]")) return;
+    const doClickZoom = (clientX: number, clientY: number) => {
       const goingIn = zoomTo <= baseZoom + 1e-3;
       zoomFrom = zoom;
       zoomTo = goingIn ? maxZoom : baseZoom;
       zoomStart = performance.now();
-      // 支点不瞬间改：从当前生效的支点滑过去，否则第一帧画面就跳一下（这正是之前的卡顿）。
-      // 推进时落到点击处（那里就是放大镜中心），退回时滑回画面中心——正好回到原始构图。
-      // 不再夹支点：画面按 cover 铺满屏幕，放大时推到哪里都不会「露底」。
       pivotFromX = pivotX;
       pivotFromY = pivotY;
       if (goingIn) {
-        // 点击坐标 → 着色器那套坐标：先减容器左上角得到画布 px，再按当前放大倍数退回版面坐标
-        // （绕 uZoomAnchor），最后减掉窗口原点。少了任何一步，放大时点哪儿支点都不对。
         const rect = host.getBoundingClientRect();
         const k = Math.max(state.scale, 1e-3);
-        pivotToX = zoomAnchor[0] + (event.clientX - rect.left - zoomAnchor[0]) / k - holeRect[0];
-        pivotToY = zoomAnchor[1] + (event.clientY - rect.top - zoomAnchor[1]) / k - holeRect[1];
+        pivotToX = zoomAnchor[0] + (clientX - rect.left - zoomAnchor[0]) / k - holeRect[0];
+        pivotToY = zoomAnchor[1] + (clientY - rect.top - zoomAnchor[1]) / k - holeRect[1];
       } else {
-        // 退回时滑回画面中心（同样是窗口内那套坐标）
         pivotToX = holeRect[2] / 2;
         pivotToY = holeRect[3] / 2;
       }
       lensTarget = goingIn ? 1 : 0;
     };
 
+    const onClick = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest("a, button, input, textarea, select, [contenteditable]")) return;
+      // detail >= 2 表示是双击的一部分，取消单击延时
+      if (event.detail >= 2) {
+        if (singleClickTimer) {
+          clearTimeout(singleClickTimer);
+          singleClickTimer = null;
+        }
+        return;
+      }
+      if (singleClickTimer) clearTimeout(singleClickTimer);
+      const cx = event.clientX;
+      const cy = event.clientY;
+      singleClickTimer = setTimeout(() => {
+        singleClickTimer = null;
+        doClickZoom(cx, cy);
+      }, 250);
+    };
+
+    const onDblClick = () => {
+      if (singleClickTimer) {
+        clearTimeout(singleClickTimer);
+        singleClickTimer = null;
+      }
+    };
     const onPointerMove = (event: PointerEvent) => {
       if (reduced) return;
       const rect = host.getBoundingClientRect();
@@ -776,6 +791,8 @@ export function SceneCanvas({
       cancelAnimationFrame(frame);
       resizeObserver.disconnect();
       host.removeEventListener("click", onClick);
+      host.removeEventListener("dblclick", onDblClick);
+      if (singleClickTimer) clearTimeout(singleClickTimer);
       host.removeEventListener("pointermove", onPointerMove);
       if (assetVideo) {
         assetVideo.pause();
@@ -789,7 +806,7 @@ export function SceneCanvas({
       gl.deleteBuffer(dustSeedBuffer);
       gl.deleteProgram(scene);
     };
-  }, [src, asset, anchorMode, disableClickZoom, state]);
+  }, [src, asset, anchorMode, state]);
 
   return (
     <div ref={hostRef} className="absolute inset-0">
