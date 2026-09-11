@@ -1,4 +1,11 @@
 import type { Metadata } from 'next';
+
+// 字体必须交给 Vite 的 CSS 管线直接处理：Fontsource 的 CSS 内是相对 url(./files/*.woff2)，
+// 一旦被 Tailwind 的 @import 内联进 globals.css，URL 重写就会失效，woff 文件不会被产出（线上 404）。
+// 因此在这里以独立 CSS 模块导入，不要写回 globals.css 的 @import。
+import '@fontsource-variable/inter';
+import '@fontsource/bonheur-royale/latin.css';
+
 import './globals.css';
 
 import { ThemeProvider } from '@/components/theme-provider';
