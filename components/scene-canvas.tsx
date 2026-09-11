@@ -19,6 +19,7 @@ import { ART_RATIO, heroGeometry } from "@/lib/hero-screen";
  *
  * 分工：
  *   · 视差、缩放缓动、镜头淡入淡出、粒子漂移都在这里的 rAF 里算；
+ *   · 画面不加彩色光罩：亮处只揉一层无色的柔光（bloom），光晕只用来决定灰尘在哪亮；
  *   · 素材的放大/显形/虚焦由 hero-scene.tsx 的滚动动画写进 state，这里每帧读（普通对象，不走 React）；
  *   · 画面按 cover 铺满屏幕（不裁不拉之外不留黑边——首屏整屏都是画面）；
  *   · 画布就是整个首屏版面（一屏 + 底下的 --hero-bleed）：素材按 cover 铺满，屏幕窗口的位置
@@ -73,10 +74,6 @@ uniform float uZoom;         // 点击定点缩放的倍数
 uniform vec2 uPivot;         // px（屏幕内坐标）
 uniform float uLens;         // 0..1
 uniform float uBlurPx;
-uniform vec3 uLightColor[${LIGHT_COUNT}];
-uniform vec2 uLightPos[${LIGHT_COUNT}];   // uv（屏幕内）
-uniform vec2 uLightSize[${LIGHT_COUNT}];  // uv 半轴
-uniform float uLightAmp[${LIGHT_COUNT}];
 // 素材与屏幕洞：都是版面 px 的矩形（x, y, w, h），见 lib/hero-screen.ts。
 // 素材整块在这里摆：uBoardScale 是它当前放大多少倍（支点 = 洞心），洞与洞里的画面跟着一起放。
 // 三样共用一套坐标，缩放于是只是改了采样——没有 DOM 边界可露。
@@ -90,6 +87,11 @@ uniform vec2 uZoomAnchor;    // 缩放支点（版面 px）：绕它放大/缩�
 
 /** 素材固有宽度（px）：把 mip 层数换回版面 px 用，见 grow。 */
 const float ASSET_W = 2200.0;
+// 柔光：把画面里亮的地方揉开一点叠回去。不带颜色、只加在亮处，所以不会糊成一层色雾；
+// 半径按「屏幕上多少像素」算（除以放大倍数），缩放时看上去一样柔，不会放大成一片糊。
+const float BLOOM_PX = 14.0;      // 揉开的半径（屏幕 px）
+const float BLOOM = 0.38;         // 叠回去的强度
+const float BLOOM_FLOOR = 0.45;   // 低于这个亮度不发光
 
 out vec4 outColor;
 
@@ -159,14 +161,12 @@ void main() {
     float edge = smoothstep(0.25, 1.0, radius);
     vec2 warpedUv = frameUv - (frameUv - 0.5) * (0.18 * uLens * edge);
 
-    color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge);
-
-    // 光晕：screen 叠加，位置跟着指针漂移
-    for (int i = 0; i < ${LIGHT_COUNT}; i++) {
-      vec2 d = (frameUv - uLightPos[i]) / uLightSize[i];
-      float alpha = clamp(1.0 - length(d) / 0.72, 0.0, 1.0);
-      color = 1.0 - (1.0 - color) * (1.0 - uLightColor[i] * alpha * uLightAmp[i]);
-    }
+    // 失焦与柔光的半径都按屏幕 px 算：除以放大倍数，缩到哪一档看上去都一样柔。
+    // （放大态下不除，边缘那圈 blur 会跟着放大成一片糊，正是之前「边缘糊在一起」的来源。）
+    vec2 vuv = videoUv(warpedUv);
+    vec3 base = sampleVideo(vuv, (uBlurPx * uLens * edge) / uBoardScale);
+    vec3 soft = sampleVideo(vuv, BLOOM_PX / uBoardScale);
+    color = base + max(soft - BLOOM_FLOOR, 0.0) * BLOOM;
   }
 
   // 素材按自己的 alpha 压上去：屏幕洞里 alpha = 0，于是洞里就是刚画好的画面——
@@ -422,10 +422,6 @@ export function SceneCanvas({
       pivot: gl.getUniformLocation(scene, "uPivot"),
       lens: gl.getUniformLocation(scene, "uLens"),
       blurPx: gl.getUniformLocation(scene, "uBlurPx"),
-      lightColor: gl.getUniformLocation(scene, "uLightColor"),
-      lightPos: gl.getUniformLocation(scene, "uLightPos"),
-      lightSize: gl.getUniformLocation(scene, "uLightSize"),
-      lightAmp: gl.getUniformLocation(scene, "uLightAmp"),
       asset: gl.getUniformLocation(scene, "uAsset"),
       art: gl.getUniformLocation(scene, "uArt"),
       hole: gl.getUniformLocation(scene, "uHole"),
@@ -687,10 +683,6 @@ export function SceneCanvas({
       gl.uniform1f(sceneLoc.assetLod, assetLod);
       gl.uniform1f(sceneLoc.holePad, holePad);
       gl.uniform2fv(sceneLoc.zoomAnchor, zoomAnchor);
-      gl.uniform3fv(sceneLoc.lightColor, lightColors);
-      gl.uniform2fv(sceneLoc.lightPos, lightPosUv);
-      gl.uniform2fv(sceneLoc.lightSize, lightSizesUv);
-      gl.uniform1fv(sceneLoc.lightAmp, lightAmps);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
       // —— 灰尘粒子：只在光里亮，加法混合叠上去
