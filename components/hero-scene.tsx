@@ -63,104 +63,150 @@ export function HeroScene() {
   const screenRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const mobile = useIsMobile();
-  // 初值 = 首帧：素材放到最大（洞盖满整屏）、还藏着、还糊着
-  const state = useRef<HeroState>({ scale: 1, opacity: 0, blur: BLUR }).current;
+
+  // 初始状态：不管什么设备，固定一进入页面就完整显示电脑素材（清晰、不透明、原比例）
+  // 手机端略做 1.1 微调裁切防下边框黑线，桌面端为 1.0
+  const defaultScale = mobile ? MOBILE_SCALE : 1.0;
+  const state = useRef<HeroState>({ scale: defaultScale, opacity: 1, blur: 0 }).current;
+
+  // 运行状态引用
+  const isExpandedRef = useRef(false);
+  const isAnimatingRef = useRef(false);
+  const virtualScrollYRef = useRef(0);
 
   useEffect(() => {
     const screen = screenRef.current;
     const box = boxRef.current;
     if (!screen || !box) return;
 
-    // 幅度和滚动区间都取版面高度（占位层 = 100vh），不取 window.innerHeight：
-    // 手机上滚起来地址栏会收，innerHeight 会跳一次，幅度跟着跳就露馅了。
-    const span = () => screen.offsetHeight;
-    const grow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
+    const baseScale = mobile ? MOBILE_SCALE : 1.0;
+    state.scale = baseScale;
+    state.opacity = 1;
+    state.blur = 0;
 
-    // 手机：显示器与画面一起显示，不钉住页面——首屏就是终态（只多放大一点），滚轮直接往下走。
-    // 只在 mount 时写一次（state 是普通对象，不触发重渲染），之后没有东西再改它。
-    if (mobile) {
-      state.scale = MOBILE_SCALE;
-      state.opacity = 1;
-      state.blur = 0;
-      return;
-    }
+    const getGrow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
 
-    // 减少动态效果时不跟滚轮较劲：直接落在终态（素材原大小、不透明、清晰），也不钉住页面。
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      const settle = () => {
-        state.scale = 1;
-        state.opacity = 1;
-        state.blur = 0;
-      };
-      settle();
-      // 版面变了（转屏、滚动条）落点就变了，得重新量一次，不然画面会漂出屏幕
-      window.addEventListener("resize", settle);
-      return () => window.removeEventListener("resize", settle);
-    }
+    // 点击放大到全屏：屏幕内播放的内容平滑放大至占满视口
+    const expandToFullscreen = () => {
+      if (isAnimatingRef.current || isExpandedRef.current) return;
+      isAnimatingRef.current = true;
+      virtualScrollYRef.current = 0;
 
-    state.scale = grow();
-    state.opacity = 0;
-    state.blur = BLUR;
-
-    const tween = gsap
-      .timeline({
-        scrollTrigger: {
-          // 钉住的正是这一屏；起止都写绝对滚动位置（数字），不用 "top top"/"+=…" 那套相对的：
-          // 数字是量得最准的一档，首屏又是文档第一块，0 就是要的那个起点。
-          trigger: screen,
-          start: 0,
-          // 虚拟滚动：这一屏钉在原地，滚轮只推着下面几条动画走，页面本身不往前走。
-          // 钉住的距离正好一屏——动画走完才放开。
-          end: () => span(),
-          scrub: true,
-          pin: true,
-          // 起手放大倍数与模糊都按函数值现取，refresh 之后重算才是确定的，
-          // 不会拿「上一次动画停在半路的值」当起点。
-          invalidateOnRefresh: true,
+      const targetScale = getGrow();
+      gsap.to(state, {
+        scale: targetScale,
+        duration: 0.85,
+        ease: "power2.out",
+        onComplete: () => {
+          isExpandedRef.current = true;
+          isAnimatingRef.current = false;
         },
-      })
-      // 素材缩回原大小：起手那一屏（屏幕盖满整屏、只剩画面）一路收成显示器里的一块，
-      // 边壳、草地、蝴蝶从画外收进来。duration 给满 1：这条就是整段钉住行程的时长，
-      // 放开页面那一下正好收完——「内容缩小完毕才让页面继续滚」就是它撑住的。
-      .fromTo(state, { scale: () => grow() }, { scale: 1, ease: "none", duration: 1 }, 0)
-      // 素材对焦：先带糊压上来、慢慢收清楚。留一截尾巴（0.9 收完）——放开页面之前它已经实了。
-      .fromTo(state, { blur: BLUR }, { blur: 0, ease: "power1.inOut", duration: 0.9 }, 0);
+      });
+    };
 
-    // 素材的透明度：滚过 50px 就已经是 100%，往后这条不再动。
-    // 于是整段动画只剩「模糊递减」和「缩回原大小」两样在走——亮度和形变分开，看着才像显影。
-    // 单独挂触发器（不并进上面那条时间轴）：50px 是个绝对值，和首屏一屏的长度无关。
-    const reveal = gsap.fromTo(
-      state,
-      { opacity: 0 },
-      {
-        opacity: 1,
-        ease: "none",
-        scrollTrigger: {
-          trigger: screen,
-          start: 0,
-          end: REVEAL_PX,
-          scrub: true,
-          invalidateOnRefresh: true,
+    // 收起回正常电脑素材状态
+    const collapseToNormal = () => {
+      if (isAnimatingRef.current || !isExpandedRef.current) return;
+      isAnimatingRef.current = true;
+
+      gsap.to(state, {
+        scale: baseScale,
+        duration: 0.75,
+        ease: "power2.inOut",
+        onComplete: () => {
+          isExpandedRef.current = false;
+          isAnimatingRef.current = false;
+          virtualScrollYRef.current = 0;
         },
-      },
-    );
+      });
+    };
+
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as Element | null;
+      if (target?.closest("a, button, input, textarea, select, [contenteditable]")) return;
+      if (window.scrollY > 10) return;
+      if (!isExpandedRef.current) {
+        expandToFullscreen();
+      } else {
+        // 再次点击也可平滑收起
+        collapseToNormal();
+      }
+    };
+    // 虚拟滚动与手势拦截：
+    // 当处于放大状态（全屏）时，滚轮或滑动手势不直接让页面跑，而是先做虚拟滚动收起；
+    // 收起回到正常电脑后，再次滚动才放行页面正常下滚。
+    const VIRTUAL_THRESHOLD = 80; // 虚拟滚动触发收起的阻尼阈值
+
+    const handleWheel = (e: WheelEvent) => {
+      if (!isExpandedRef.current) return;
+
+      // 处于放大全屏态
+      if (e.deltaY > 0) {
+        // 往下滚：拦截页面真实滚动，累加虚拟滚动
+        e.preventDefault();
+        virtualScrollYRef.current += e.deltaY;
+        if (virtualScrollYRef.current >= VIRTUAL_THRESHOLD && !isAnimatingRef.current) {
+          collapseToNormal();
+        }
+      } else if (e.deltaY < 0) {
+        // 往上滚：减小虚拟滚动累加
+        e.preventDefault();
+        virtualScrollYRef.current = Math.max(0, virtualScrollYRef.current + e.deltaY);
+      }
+    };
+
+    // 移动端触屏滑动虚拟滚动拦截
+    let touchStartY = 0;
+    const handleTouchStart = (e: TouchEvent) => {
+      touchStartY = e.touches[0].clientY;
+    };
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!isExpandedRef.current) return;
+      const currentY = e.touches[0].clientY;
+      const diff = touchStartY - currentY; // 正值表示向上滑动（页面想要往下滚）
+      if (diff > 0) {
+        e.preventDefault();
+        virtualScrollYRef.current += diff;
+        touchStartY = currentY;
+        if (virtualScrollYRef.current >= VIRTUAL_THRESHOLD && !isAnimatingRef.current) {
+          collapseToNormal();
+        }
+      }
+    };
+
+    // 窗口尺寸变化时，保持比例正确
+    const handleResize = () => {
+      if (isExpandedRef.current && !isAnimatingRef.current) {
+        state.scale = getGrow();
+      } else if (!isExpandedRef.current && !isAnimatingRef.current) {
+        state.scale = mobile ? MOBILE_SCALE : 1.0;
+      }
+    };
+
+    screen.addEventListener("click", handleClick);
+    window.addEventListener("wheel", handleWheel, { passive: false });
+    window.addEventListener("touchstart", handleTouchStart, { passive: true });
+    window.addEventListener("touchmove", handleTouchMove, { passive: false });
+    window.addEventListener("resize", handleResize);
 
     return () => {
-      reveal.scrollTrigger?.kill();
-      reveal.kill();
-      tween.scrollTrigger?.kill();
-      tween.kill();
+      screen.removeEventListener("click", handleClick);
+      window.removeEventListener("wheel", handleWheel);
+      window.removeEventListener("touchstart", handleTouchStart);
+      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("resize", handleResize);
     };
   }, [state, mobile]);
 
   return (
-    <div ref={screenRef} aria-hidden className="hero-scene">
+    <div ref={screenRef} aria-hidden className="hero-scene cursor-pointer">
       <div ref={boxRef} className="hero-canvas">
         <SceneCanvas
           src="/bg-loop.mp4"
           poster="/bg-v1.webp"
           asset="/fly-pc_alpha.webm"
-          zoomAnchor={mobile ? "canvas" : "screen"}
+          zoomAnchor="screen"
+          disableClickZoom
           state={state}
         />
       </div>

@@ -314,6 +314,7 @@ export function SceneCanvas({
   poster,
   asset,
   zoomAnchor: anchorMode,
+  disableClickZoom = false,
   state,
 }: {
   /** 视频（画面本体） */
@@ -324,11 +325,11 @@ export function SceneCanvas({
   asset: string;
   /**
    * 缩放支点：`screen` = 绕屏幕（素材里那块玻璃）中心，`canvas` = 绕画布中心。
-   * 桌面的「缩进屏幕」要绕屏幕——绕画布的话屏幕偏在素材右上方，缩到能盖住整版时得放大十倍；
-   * 手机没有那段动画，绕画布中心放大一点点即可，构图不会跟着屏幕跑偏。
    */
   zoomAnchor: "screen" | "canvas";
-  /** 滚动动画写的状态，每帧读 */
+  /** 是否关闭画内的微观点击放大（由外部接管全屏放大交互） */
+  disableClickZoom?: boolean;
+  /** 滚动/缩放状态，每帧读 */
   state: HeroState;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -569,6 +570,7 @@ export function SceneCanvas({
     };
 
     const onClick = (event: MouseEvent) => {
+      if (disableClickZoom) return;
       const target = event.target as Element | null;
       if (target?.closest("a, button, input, textarea, select, [contenteditable]")) return;
       const goingIn = zoomTo <= baseZoom + 1e-3;
@@ -787,7 +789,7 @@ export function SceneCanvas({
       gl.deleteBuffer(dustSeedBuffer);
       gl.deleteProgram(scene);
     };
-  }, [src, asset, anchorMode, state]);
+  }, [src, asset, anchorMode, disableClickZoom, state]);
 
   return (
     <div ref={hostRef} className="absolute inset-0">
