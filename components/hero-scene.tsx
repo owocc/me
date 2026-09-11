@@ -21,6 +21,12 @@ const REVEAL_PX = 50;
 /** 手机那一档（与 Tailwind 的 md 同界）：这一档不做「缩进屏幕」那套。 */
 const MOBILE = "(max-width: 767px)";
 
+/**
+ * 手机起手多放大一点：素材本身下沿压着一片虚焦的暗前景，原大小铺上去会在底部留一条压暗的边；
+ * 放大一点点把它推出画外，画面正好铺满。
+ */
+const MOBILE_SCALE = 1.1;
+
 /** 手机：起手就显示器和画面一起在，不缩放、不钉住，滚轮直接往下走。 */
 function useIsMobile() {
   const [mobile, setMobile] = useState(false);
@@ -68,12 +74,12 @@ export function HeroScene() {
     // 幅度和滚动区间都取版面高度（占位层 = 100vh），不取 window.innerHeight：
     // 手机上滚起来地址栏会收，innerHeight 会跳一次，幅度跟着跳就露馅了。
     const span = () => screen.offsetHeight;
-    const grow = () => heroGeometry(box.offsetWidth, box.offsetHeight, !mobile).grow;
+    const grow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
 
-    // 手机：显示器与画面一起显示，不缩放也不钉住页面——首屏就是终态，滚轮直接往下走。
+    // 手机：显示器与画面一起显示，不钉住页面——首屏就是终态（只多放大一点），滚轮直接往下走。
     // 只在 mount 时写一次（state 是普通对象，不触发重渲染），之后没有东西再改它。
     if (mobile) {
-      state.scale = 1;
+      state.scale = MOBILE_SCALE;
       state.opacity = 1;
       state.blur = 0;
       return;
@@ -154,7 +160,7 @@ export function HeroScene() {
           src="/bg-loop.mp4"
           poster="/bg-v1.webp"
           asset="/pc_cutout.webp"
-          contain={!mobile}
+          zoomAnchor={mobile ? "canvas" : "screen"}
           state={state}
         />
       </div>

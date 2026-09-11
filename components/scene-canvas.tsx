@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 
-import { ART_RATIO, VIDEO_ASPECT, heroGeometry } from "@/lib/hero-screen";
+import { ART_RATIO, heroGeometry } from "@/lib/hero-screen";
 
 /**
  * 首屏场景（WebGL2 一块画布）：视频 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子，
@@ -20,8 +20,7 @@ import { ART_RATIO, VIDEO_ASPECT, heroGeometry } from "@/lib/hero-screen";
  * 分工：
  *   · 视差、缩放缓动、镜头淡入淡出、粒子漂移都在这里的 rAF 里算；
  *   · 素材的放大/显形/虚焦由 hero-scene.tsx 的滚动动画写进 state，这里每帧读（普通对象，不走 React）；
- *   · 画面摆放看 contain 这个开关：桌面端 true（整幅画面都在屏幕里，上下留黑边，不裁内容），
- *     手机端 false（铺满屏幕，两侧裁掉）——同一份几何、同一套坐标，只差一个 fit 方向；
+ *   · 画面按 cover 铺满屏幕（不裁不拉之外不留黑边——首屏整屏都是画面）；
  *   · 画布就是整个首屏版面（一屏 + 底下的 --hero-bleed）：素材按 cover 铺满，屏幕窗口的位置
  *     与大小照 lib/hero-screen.ts 里量好的比例算，两边共用同一份几何；
  *   · 视频只是纹理来源：元素铺在画布下面（保持可见→浏览器不会掐掉解码，被画布盖住→看不见）；
@@ -84,23 +83,21 @@ uniform float uBoardScale;
 uniform float uAssetAlpha;   // 素材整体不透明度（0..1），滚过开头那段就一直是 1
 uniform float uAssetLod;     // 素材显形那层虚焦：mip 层数（0 = 原图，越大越糊）
 uniform float uHolePad;      // 窗口比玻璃小出来的那一圈（px，见 lib/hero-screen.ts 的 pad）
-uniform float uVideoContain; // 1 = 整幅画面都在屏幕里（上下留黑边）；0 = 铺满屏幕（两侧裁掉）
+uniform vec2 uZoomAnchor;    // 缩放支点（版面 px）：绕它放大/缩小整个版面
 
 /** 素材固有宽度（px）：把 mip 层数换回版面 px 用，见 grow。 */
 const float ASSET_W = 2200.0;
 
 out vec4 outColor;
 
-// 屏幕 uv（y 向下）→ 视频 uv（含摆放、视差、定点缩放）。框就是屏幕那块洞。
-// uVideoContain = 1 时按 contain 摆：整幅画面都看得见，宁可上下留黑边（宽银幕片在 4:3 电视上）；= 0 时按 cover 摆满。
+// 屏幕 uv（y 向下）→ 视频 uv（含 cover 摆放、视差、定点缩放）。框就是屏幕那块洞：
+// 画面按 cover 铺满它，不裁不拉之外的黑边一概不留（首屏整屏都是画面）。
 vec2 videoUv(vec2 frameUv) {
   vec2 frameRes = uHole.zw;
   vec2 px = frameUv * frameRes;
   vec2 zoomed = uPivot + (px - uPivot) / uZoom;
-  float fit = mix(max(frameRes.x / uVideoSize.x, frameRes.y / uVideoSize.y),
-                  min(frameRes.x / uVideoSize.x, frameRes.y / uVideoSize.y),
-                  uVideoContain);
-  vec2 displayed = uVideoSize * fit;
+  float cover = max(frameRes.x / uVideoSize.x, frameRes.y / uVideoSize.y);
+  vec2 displayed = uVideoSize * cover;
   vec2 origin = (frameRes - displayed) * 0.5 - uPhotoOffset;
   return (zoomed - origin) / displayed;
 }
@@ -125,10 +122,10 @@ void main() {
   vec2 screenUv = vec2(gl_FragCoord.x / uBuffer.x, 1.0 - gl_FragCoord.y / uBuffer.y);
   vec2 px = screenUv * uRes;
 
-  // 反解素材那一路缩放（支点 = 洞心）：这个像素在「还没缩」的版面坐标里落在哪。
-  // 素材、屏幕洞、洞里的画面全都摆在这套坐标里，于是放大到几倍都对得上。
-  vec2 holeCenter = uHole.xy + uHole.zw * 0.5;
-  vec2 board = holeCenter + (px - holeCenter) / uBoardScale;
+  // 反解素材那一路缩放：这个像素在「还没缩」的版面坐标里落在哪。
+  // 支点由 uZoomAnchor 给（画布中心或屏幕中心），整幅版面绕它缩放——素材、屏幕窗口、
+  // 窗口里的画面都摆在这套坐标里，于是放大到几倍都对得上，构图也不会因为屏幕不在正中而跑偏。
+  vec2 board = uZoomAnchor + (px - uZoomAnchor) / uBoardScale;
 
   // 素材：cover 之后按 uArt 归一。用 textureGrad 而不是 textureLod：导数乘上 2^lod 等于
   // 「再糊 lod 层 mip」，同时保留硬件自己那档缩小选层——移动端素材从 2200 缩到 1600 上下，
@@ -145,8 +142,8 @@ void main() {
   vec2 holePx = board - uHole.xy;
   bool insideHole = holePx.x > -grow && holePx.y > -grow && holePx.x < uHole.z + grow && holePx.y < uHole.w + grow;
 
-  // 窗口外是黑的：它是留白不是漏——屏幕里那两条黑边就是同一块，窗口外露出也接得上。
-  // （素材显形之后窗口外全被素材盖住，实际只在起手那几帧看得见。）
+  // 窗口外是黑的：它是兜底不是设计——起手倍数保证窗口盖住整个版面，素材显形后又全被素材盖住，
+  // 所以正常情况看不见它；真露出来说明几何出了问题，黑一下好过透出网页底色。
   vec3 color = vec3(0.0);
   if (insideHole) {
     vec2 frameUv = holePx / uHole.zw;
@@ -159,11 +156,7 @@ void main() {
     float edge = smoothstep(0.25, 1.0, radius);
     vec2 warpedUv = frameUv - (frameUv - 0.5) * (0.18 * uLens * edge);
 
-    vec2 vuv = videoUv(warpedUv);
-    // 画面之外（uv 出了 0..1）留黑：一条像素宽的软过渡，别切出锯齿边
-    vec2 fade = 1.0 / uHole.zw;
-    vec2 inPic = smoothstep(vec2(0.0), fade, vuv) * (1.0 - smoothstep(vec2(1.0) - fade, vec2(1.0), vuv));
-    color = sampleVideo(vuv, uBlurPx * uLens * edge) * (inPic.x * inPic.y);
+    color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge);
 
     // 三层光：screen 叠加，位置各自跟着指针漂移
     for (int i = 0; i < 3; i++) {
@@ -183,7 +176,8 @@ in vec2 aPos;
 in float aSeed;
 uniform vec2 uRes;           // 版面（画布）CSS 像素
 uniform vec4 uHole;          // 屏幕洞在版面里的矩形
-uniform float uBoardScale;   // 素材放大倍数（支点 = 洞心）：粒子和屏幕一起放，于是始终待在屏幕里
+uniform float uBoardScale;   // 版面放大倍数：粒子和屏幕一起放，于是始终待在屏幕里
+uniform vec2 uZoomAnchor;    // 缩放支点（版面 px）：与 FRAG 用同一个
 uniform vec2 uLightPos[3];
 uniform vec2 uLightSize[3];
 uniform float uLightAmp[3];
@@ -193,9 +187,8 @@ out vec2 vBoard;             // 粒子在版面坐标里的位置（px）：碎�
 void main() {
   // aPos 是屏幕洞内的 uv（和光的位置同一套坐标）：先摆回版面，再按素材那一路放大，最后归到画布 uv。
   // 起手放大到 5 倍多时，粒子跟着铺满整屏——它们本来就该在屏幕里，而不是钉在屏幕上不动。
-  vec2 center = uHole.xy + uHole.zw * 0.5;
   vec2 boardPx = uHole.xy + aPos * uHole.zw;
-  vec2 p = (center + (boardPx - center) * uBoardScale) / uRes;
+  vec2 p = (uZoomAnchor + (boardPx - uZoomAnchor) * uBoardScale) / uRes;
   vBoard = boardPx;
   float light = 0.0;
   for (int i = 0; i < 3; i++) {
@@ -215,26 +208,16 @@ const DUST_FRAG = `#version 300 es
 precision highp float;
 uniform sampler2D uAsset;    // PC 素材
 uniform vec4 uArt;           // 素材在版面里的矩形（px）
-uniform vec4 uHole;          // 画面窗口在版面里的矩形（px）
-uniform vec2 uVideoSize;     // 片子尺寸：算 contain 之后画面在窗口里占哪一块
-uniform float uVideoContain; // 同 FRAG：1 = 画面上下留黑边，0 = 铺满
 uniform float uAssetAlpha;   // 素材整体不透明度：显形之前它没画上去，粒子也就不该被掐
 in float vBright;
 in vec2 vBoard;              // 版面坐标（px）
 out vec4 outColor;
 void main() {
-  // 只在画面里落灰：一是素材不透明的地方（屏幕边壳与草地）不出灰，二是屏幕里那两条黑边也不算画面。
-  vec2 frameRes = uHole.zw;
-  float fit = mix(max(frameRes.x / uVideoSize.x, frameRes.y / uVideoSize.y),
-                  min(frameRes.x / uVideoSize.x, frameRes.y / uVideoSize.y),
-                  uVideoContain);
-  vec2 shown = uVideoSize * fit;
-  vec2 origin = uHole.xy + (frameRes - shown) * 0.5;
-  vec2 inPic = smoothstep(origin, origin + vec2(1.0), vBoard)
-             * (1.0 - smoothstep(origin + shown - vec2(1.0), origin + shown, vBoard));
+  // 只在画面里落灰：素材不透明的地方是屏幕边壳与草地，按素材的 alpha 把粒子掐掉。
+  // 画面按 cover 铺满屏幕，屏幕范围内处处是画面，所以只掐这一道就够。
   vec2 assetUv = (vBoard - uArt.xy) / uArt.zw;
   float opaque = textureLod(uAsset, vec2(assetUv.x, 1.0 - assetUv.y), 0.0).a * uAssetAlpha;
-  float keep = (1.0 - smoothstep(0.45, 0.9, opaque)) * inPic.x * inPic.y;
+  float keep = 1.0 - smoothstep(0.45, 0.9, opaque);
   float d = length(gl_PointCoord - 0.5) * 2.0;
   float a = (1.0 - smoothstep(0.2, 1.0, d)) * vBright * keep;
   outColor = vec4(vec3(1.0), a);
@@ -327,7 +310,7 @@ export function SceneCanvas({
   src,
   poster,
   asset,
-  contain,
+  zoomAnchor: anchorMode,
   state,
 }: {
   /** 视频（画面本体） */
@@ -336,8 +319,12 @@ export function SceneCanvas({
   poster: string;
   /** PC 素材（显示器 + 草地），屏幕那块洞是全透明的 */
   asset: string;
-  /** 画面怎么摆：true = 整幅都在屏幕里（上下留黑边）；false = 铺满屏幕（两侧裁掉） */
-  contain: boolean;
+  /**
+   * 缩放支点：`screen` = 绕屏幕（素材里那块玻璃）中心，`canvas` = 绕画布中心。
+   * 桌面的「缩进屏幕」要绕屏幕——绕画布的话屏幕偏在素材右上方，缩到能盖住整版时得放大十倍；
+   * 手机没有那段动画，绕画布中心放大一点点即可，构图不会跟着屏幕跑偏。
+   */
+  zoomAnchor: "screen" | "canvas";
   /** 滚动动画写的状态，每帧读 */
   state: HeroState;
 }) {
@@ -420,21 +407,6 @@ export function SceneCanvas({
     };
     assetImage.src = asset;
 
-    // 片子比例和 lib/hero-screen.ts 里记的对不上就报一声：起手倍数、屏幕里的 contain 摆放
-    // 都是照那个常量算的，换片子（不再是 16:9）要回去改常量。
-    video.addEventListener(
-      "loadedmetadata",
-      () => {
-        const ratio = (video.videoWidth || 16) / (video.videoHeight || 9);
-        if (Math.abs(ratio - VIDEO_ASPECT) > 0.01) {
-          console.warn(
-            `[scene-canvas] 片子宽高比 ${ratio.toFixed(4)} 与 VIDEO_ASPECT ${VIDEO_ASPECT.toFixed(4)} 不一致，起手倍数要重新对一遍（lib/hero-screen.ts）`,
-          );
-        }
-      },
-      { once: true },
-    );
-
     // —— 着色器里的固定表
     // 位置只查一次：每帧再 getUniformLocation/getAttribLocation 都是同步 GL 调用，白花时间
     const sceneLoc = {
@@ -458,7 +430,7 @@ export function SceneCanvas({
       assetAlpha: gl.getUniformLocation(scene, "uAssetAlpha"),
       assetLod: gl.getUniformLocation(scene, "uAssetLod"),
       holePad: gl.getUniformLocation(scene, "uHolePad"),
-      videoContain: gl.getUniformLocation(scene, "uVideoContain"),
+      zoomAnchor: gl.getUniformLocation(scene, "uZoomAnchor"),
     };
     const dustPosAttr = gl.getAttribLocation(dustProgram, "aPos");
     const dustSeedAttr = gl.getAttribLocation(dustProgram, "aSeed");
@@ -466,10 +438,9 @@ export function SceneCanvas({
       res: gl.getUniformLocation(dustProgram, "uRes"),
       hole: gl.getUniformLocation(dustProgram, "uHole"),
       boardScale: gl.getUniformLocation(dustProgram, "uBoardScale"),
+      zoomAnchor: gl.getUniformLocation(dustProgram, "uZoomAnchor"),
       asset: gl.getUniformLocation(dustProgram, "uAsset"),
       art: gl.getUniformLocation(dustProgram, "uArt"),
-      videoSize: gl.getUniformLocation(dustProgram, "uVideoSize"),
-      videoContain: gl.getUniformLocation(dustProgram, "uVideoContain"),
       assetAlpha: gl.getUniformLocation(dustProgram, "uAssetAlpha"),
       lightPos: gl.getUniformLocation(dustProgram, "uLightPos"),
       lightSize: gl.getUniformLocation(dustProgram, "uLightSize"),
@@ -486,8 +457,6 @@ export function SceneCanvas({
     /** 素材与屏幕洞在版面里的矩形（px）：版面一变就重新量，见 lib/hero-screen.ts */
     const artRect = new Float32Array(4);
     const holeRect = new Float32Array(4);
-    /** 1 = 整幅画面都在屏幕里（上下留黑边），0 = 铺满屏幕 */
-    const containFlag = contain ? 1 : 0;
 
     // —— CSS 令牌
     const blurPx = cssNumber("--lens-blur", 9);
@@ -522,6 +491,8 @@ export function SceneCanvas({
     let growRef = 1;
     /** 4:3 的窗口比玻璃小出来的那一圈（px）：着色器拿它把画面往外多画一圈 */
     let holePad = 0;
+    /** 缩放支点（版面 px）：桌面绕屏幕中心（起手要盖满整版），手机绕画布中心（构图不跟着屏幕跑） */
+    const zoomAnchor = new Float32Array(2);
     const photoCurrent = [0, 0];
     const photoTarget = [0, 0];
     const lightCurrent = LIGHTS.map(() => [0, 0]);
@@ -540,7 +511,7 @@ export function SceneCanvas({
       canvas.height = Math.round(height * dpr);
       // 素材按 cover 铺满整块画布，屏幕洞的位置与大小跟着素材走。着色器里的逆映射、
       // GSAP 那边的起手倍数都取自同一份几何（lib/hero-screen.ts），不会各算一套。
-      const geom = heroGeometry(width, height, contain);
+      const geom = heroGeometry(width, height);
       artRect.set([geom.art.x, geom.art.y, geom.art.w, geom.art.h]);
       holeRect.set([
         geom.hole.cx - geom.hole.w / 2,
@@ -551,6 +522,9 @@ export function SceneCanvas({
       // 起手放大倍数：视差收幅度、以及几何那套的参考值（见 follow()）。版面变了就跟着变。
       growRef = geom.grow;
       holePad = geom.pad;
+      // 桌面绕屏幕中心（= 洞心，缩放不动的那个点），手机绕画布中心
+      zoomAnchor[0] = anchorMode === "canvas" ? width / 2 : geom.hole.cx;
+      zoomAnchor[1] = anchorMode === "canvas" ? height / 2 : geom.hole.cy;
       // 点击定点缩放的起手支点 = 屏幕洞心：第一次量到几何时落在那儿，之后只跟着动画走
       if (!pivotX && !pivotY) {
         pivotX = pivotFromX = pivotToX = geom.hole.cx;
@@ -578,7 +552,7 @@ export function SceneCanvas({
       zoomStart = performance.now();
       // 支点不瞬间改：从当前生效的支点滑过去，否则第一帧画面就跳一下（这正是之前的卡顿）。
       // 推进时落到点击处（那里就是放大镜中心），退回时滑回画面中心——正好回到原始构图。
-      // 不再夹支点：画面按 contain 摆、四周本来就是黑的，放大时推到哪里都不会「露底」。
+      // 不再夹支点：画面按 cover 铺满屏幕，放大时推到哪里都不会「露底」。
       pivotFromX = pivotX;
       pivotFromY = pivotY;
       if (goingIn) {
@@ -699,7 +673,7 @@ export function SceneCanvas({
       gl.uniform1f(sceneLoc.assetAlpha, assetAlpha);
       gl.uniform1f(sceneLoc.assetLod, assetLod);
       gl.uniform1f(sceneLoc.holePad, holePad);
-      gl.uniform1f(sceneLoc.videoContain, containFlag);
+      gl.uniform2fv(sceneLoc.zoomAnchor, zoomAnchor);
       gl.uniform3fv(sceneLoc.lightColor, lightColors);
       gl.uniform2fv(sceneLoc.lightPos, lightPosUv);
       gl.uniform2fv(sceneLoc.lightSize, lightSizesUv);
@@ -738,11 +712,10 @@ export function SceneCanvas({
         gl.uniform2f(dustLoc.res, width, height);
         gl.uniform4fv(dustLoc.hole, holeRect);
         gl.uniform1f(dustLoc.boardScale, boardScale);
+        gl.uniform2fv(dustLoc.zoomAnchor, zoomAnchor);
         // 粒子只在视频里亮：素材的 alpha 由碎片着色器查，采样器指向 1 号单元（上面绑的就是素材）
         gl.uniform1i(dustLoc.asset, 1);
         gl.uniform4fv(dustLoc.art, artRect);
-        gl.uniform2f(dustLoc.videoSize, video.videoWidth || 16, video.videoHeight || 9);
-        gl.uniform1f(dustLoc.videoContain, containFlag);
         gl.uniform1f(dustLoc.assetAlpha, assetAlpha);
         gl.uniform1f(dustLoc.dust, DUST_AMOUNT * (0.7 + 0.3 * lens));
         gl.drawArrays(gl.POINTS, 0, DUST_COUNT);
@@ -772,7 +745,7 @@ export function SceneCanvas({
       gl.deleteProgram(scene);
       gl.deleteProgram(dustProgram);
     };
-  }, [src, asset, contain, state]);
+  }, [src, asset, anchorMode, state]);
 
   return (
     <div ref={hostRef} className="absolute inset-0">
