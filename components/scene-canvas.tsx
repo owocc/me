@@ -82,6 +82,7 @@ uniform vec4 uHole;
 uniform float uBoardScale;
 uniform float uAssetAlpha;   // 素材整体不透明度（0..1），滚过开头那段就一直是 1
 uniform float uAssetLod;     // 素材显形那层虚焦：mip 层数（0 = 原图，越大越糊）
+uniform float uHolePad;      // 窗口比玻璃小出来的那一圈（px，见 lib/hero-screen.ts 的 pad）
 uniform vec3 uDesk;          // 素材还没显形时，它后面那层底色（网页台面）
 
 /** 素材固有宽度（px）：把 mip 层数换回版面 px 用，见 grow。 */
@@ -134,9 +135,9 @@ void main() {
   vec2 assetDy = dFdy(assetUv) * assetBias;
   vec4 asset = textureGrad(uAsset, vec2(assetUv.x, 1.0 - assetUv.y), vec2(assetDx.x, -assetDx.y), vec2(assetDy.x, -assetDy.y));
 
-  // 洞里才画场景。洞往外放一圈：素材的虚焦、屏幕洞里外那圈抗锯齿都会漫出来，
-  // 那圈像素得接着画画面，不然素材的透明边会把底色拉出一道灰边。
-  float grow = 1.0 + exp2(uAssetLod) * (uArt.z / ASSET_W) * 2.0;
+  // 洞里才画场景。洞往外放一圈：画面窗口是 4:3、玻璃包围盒更宽，这一圈得接着画画面，
+  // 否则那圈会透出台面底色；素材自己的虚焦与洞里外那圈抗锯齿也会漫出来，一并算进去。
+  float grow = max(uHolePad, exp2(uAssetLod) * (uArt.z / ASSET_W) * 2.0);
   vec2 holePx = board - uHole.xy;
   bool insideHole = holePx.x > -grow && holePx.y > -grow && holePx.x < uHole.z + grow && holePx.y < uHole.w + grow;
 
@@ -247,13 +248,18 @@ function link(gl: WebGL2RenderingContext, vert: string, frag: string): WebGLProg
   return null;
 }
 
-/** oklch 字符串 → 0..1 的 rgb：借 canvas 让浏览器自己换算。 */
+/**
+ * oklch 字符串 → 0..1 的 rgb：借 canvas 让浏览器自己换算。
+ * 画一个像素再读回来——别去解析 ctx.fillStyle：Chrome 对 oklch 会原样返回字符串，
+ * 早先按 #hex 解析，于是所有 oklch 颜色（三层光的暖色、台面底色）都落成了白色。
+ */
 function toRgb(color: string): [number, number, number] {
-  const ctx = document.createElement("canvas").getContext("2d");
+  const ctx = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   if (!ctx) return [1, 1, 1];
   ctx.fillStyle = color;
-  const hex = ctx.fillStyle.startsWith("#") ? ctx.fillStyle.slice(1) : "ffffff";
-  return [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
+  ctx.fillRect(0, 0, 1, 1);
+  const pixel = ctx.getImageData(0, 0, 1, 1).data;
+  return [pixel[0] / 255, pixel[1] / 255, pixel[2] / 255];
 }
 
 function cssNumber(name: string, fallback: number): number {
@@ -413,6 +419,7 @@ export function SceneCanvas({
       boardScale: gl.getUniformLocation(scene, "uBoardScale"),
       assetAlpha: gl.getUniformLocation(scene, "uAssetAlpha"),
       assetLod: gl.getUniformLocation(scene, "uAssetLod"),
+      holePad: gl.getUniformLocation(scene, "uHolePad"),
       desk: gl.getUniformLocation(scene, "uDesk"),
     };
     const dustPosAttr = gl.getAttribLocation(dustProgram, "aPos");
@@ -475,6 +482,8 @@ export function SceneCanvas({
     let awake = true;
     /** 素材起手放大到多少倍（在 resize() 里按版面量）：视差收幅度按「缩到多小」线性插 */
     let growRef = 1;
+    /** 4:3 的窗口比玻璃小出来的那一圈（px）：着色器拿它把画面往外多画一圈 */
+    let holePad = 0;
     const photoCurrent = [0, 0];
     const photoTarget = [0, 0];
     const lightCurrent = LIGHTS.map(() => [0, 0]);
@@ -503,6 +512,7 @@ export function SceneCanvas({
       ]);
       // 起手放大倍数：视差收幅度、以及几何那套的参考值（见 follow()）。版面变了就跟着变。
       growRef = geom.grow;
+      holePad = geom.pad;
       // 点击定点缩放的起手支点 = 屏幕洞心：第一次量到几何时落在那儿，之后只跟着动画走
       if (!pivotX && !pivotY) {
         pivotX = pivotFromX = pivotToX = geom.hole.cx;
@@ -675,6 +685,7 @@ export function SceneCanvas({
       gl.uniform1f(sceneLoc.boardScale, boardScale);
       gl.uniform1f(sceneLoc.assetAlpha, assetAlpha);
       gl.uniform1f(sceneLoc.assetLod, assetLod);
+      gl.uniform1f(sceneLoc.holePad, holePad);
       gl.uniform3fv(sceneLoc.desk, deskRgb);
       gl.uniform3fv(sceneLoc.lightColor, lightColors);
       gl.uniform2fv(sceneLoc.lightPos, lightPosUv);
