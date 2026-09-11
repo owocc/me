@@ -19,11 +19,12 @@ import { ART_RATIO, heroGeometry } from "@/lib/hero-screen";
  *
  * 分工：
  *   · 视差、缩放缓动、镜头淡入淡出、粒子漂移都在这里的 rAF 里算；
- *   · 滚动模糊（画面从屏幕底部往上糊、随滚动加深）在片段着色器里算，见 FRAG 里的 uSweep；
  *   · 素材的放大/显形/虚焦由 hero-scene.tsx 的滚动动画写进 state，这里每帧读（普通对象，不走 React）；
  *   · 画布就是整个首屏版面（一屏 + 底下的 --hero-bleed）：素材按 cover 铺满，屏幕洞的位置
  *     与大小照 lib/hero-screen.ts 里量好的比例算，两边共用同一份几何；
  *   · 视频只是纹理来源：元素铺在画布下面（保持可见→浏览器不会掐掉解码，被画布盖住→看不见）；
+ *   · 灰尘粒子在片段着色器里按素材的 alpha 掐一道：素材不透明的地方（屏幕边壳、草地）不落灰，
+ *     于是灰始终只出现在视频里；
  *   · 画布拿不到 WebGL2 时它自己隐藏，底下那段视频就是兜底背景；
  *   · 容器整块滚出视野就停画（视频也一起暂停），看不见的场景不该一直烧 CPU。
  */
@@ -37,6 +38,14 @@ const LIGHTS = [
 
 /** 照片层视差：与光反向、幅度最小（越远的东西走得越反），单位是像素。 */
 const PHOTO_PARALLAX = { range: [18, 12], ease: 0.07, direction: -1 } as const;
+
+/**
+ * 缩进显示器里之后，画面跟指针走的幅度收到原来的几成。
+ * 起手那屏画面铺满整块版面，18px 的位移摊在大画面上正合适；落进屏幕里以后画面只剩
+ * 三百来像素宽，再照这个幅度晃就像画面在自己框里游，收一档才像贴在屏幕里。
+ * 收多少按素材缩到多小的比例线性插值（见 render 里的 follow）。
+ */
+const SHRUNK_FOLLOW = 0.4;
 
 const DUST_COUNT = 220;
 /** 粒子整体亮度（0..1），想更明显就调大。 */
@@ -61,11 +70,6 @@ uniform float uZoom;         // 点击定点缩放的倍数
 uniform vec2 uPivot;         // px（屏幕内坐标）
 uniform float uLens;         // 0..1
 uniform float uBlurPx;
-uniform float uSweep;        // 0..1：往下滚了多少（一屏 = 1）
-uniform float uSweepBlur;    // 滚到底那一档的最大模糊半径（px）
-uniform float uEdgePx;       // 纸的上沿在屏幕上的 y（px，0 = 屏幕顶）
-uniform float uViewTop;      // 画布顶边在视口里的 y（px）
-uniform float uViewH;        // 视口高（px）
 uniform vec3 uLightColor[3];
 uniform vec2 uLightPos[3];   // uv（屏幕内）
 uniform vec2 uLightSize[3];  // uv 半轴
@@ -80,10 +84,6 @@ uniform float uAssetAlpha;   // 素材整体不透明度（0..1），滚过开�
 uniform float uAssetLod;     // 素材显形那层虚焦：mip 层数（0 = 原图，越大越糊）
 uniform vec3 uDesk;          // 素材还没显形时，它后面那层底色（网页台面）
 
-// 滚动模糊：一条贴着纸上沿往上铺的模糊带——越靠近纸越糊，往上渐清晰，整条随滚动加深。
-// 之所以贴着纸的上沿而不是屏幕底：纸盖上来以后屏幕底下那半截早被纸挡住了，
-// 把最糊的一段放在那儿等于白糊；纸的上沿才是「画面还露着的最下边」。
-const float SWEEP_BAND = 0.4;   // 模糊带高度（占视口高的比例）
 /** 素材固有宽度（px）：把 mip 层数换回版面 px 用，见 grow。 */
 const float ASSET_W = 2200.0;
 
@@ -125,27 +125,18 @@ void main() {
   vec2 holeCenter = uHole.xy + uHole.zw * 0.5;
   vec2 board = holeCenter + (px - holeCenter) / uBoardScale;
 
-  // 滚动模糊：像素在屏幕上的位置（0 = 屏幕顶，1 = 屏幕底）。uViewTop 是画布顶边在视口里的 y，
-  // 加它才是屏幕坐标（减号会把整幅画面推到屏幕底下去）。
-  float vy = (px.y + uViewTop) / max(uViewH, 1.0);
-  float edgeVy = uEdgePx / max(uViewH, 1.0);
-  float sweepT = clamp(1.0 - (edgeVy - vy) / SWEEP_BAND, 0.0, 1.0);
-  float sweepPx = uSweep * uSweepBlur * sweepT;
-  // 同一档模糊，换成素材的 mip 层数：素材显形那几帧还露着，不该干干净净地糊
-  float sweepLod = log2(1.0 + sweepPx);
-
   // 素材：cover 之后按 uArt 归一。用 textureGrad 而不是 textureLod：导数乘上 2^lod 等于
   // 「再糊 lod 层 mip」，同时保留硬件自己那档缩小选层——移动端素材从 2200 缩到 1600 上下，
   // 全按 lod 0 采会闪（本来该走 mip 的那点缩小被跳过，草丛和蝴蝶边缘会跳）。
   vec2 assetUv = (board - uArt.xy) / uArt.zw;
-  float assetBias = exp2(uAssetLod + sweepLod);
+  float assetBias = exp2(uAssetLod);
   vec2 assetDx = dFdx(assetUv) * assetBias;
   vec2 assetDy = dFdy(assetUv) * assetBias;
   vec4 asset = textureGrad(uAsset, vec2(assetUv.x, 1.0 - assetUv.y), vec2(assetDx.x, -assetDx.y), vec2(assetDy.x, -assetDy.y));
 
   // 洞里才画场景。洞往外放一圈：素材的虚焦、屏幕洞里外那圈抗锯齿都会漫出来，
   // 那圈像素得接着画画面，不然素材的透明边会把底色拉出一道灰边。
-  float grow = 1.0 + exp2(uAssetLod + sweepLod) * (uArt.z / ASSET_W) * 2.0;
+  float grow = 1.0 + exp2(uAssetLod) * (uArt.z / ASSET_W) * 2.0;
   vec2 holePx = board - uHole.xy;
   bool insideHole = holePx.x > -grow && holePx.y > -grow && holePx.x < uHole.z + grow && holePx.y < uHole.w + grow;
 
@@ -161,7 +152,7 @@ void main() {
     float edge = smoothstep(0.25, 1.0, radius);
     vec2 warpedUv = frameUv - (frameUv - 0.5) * (0.18 * uLens * edge);
 
-    color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge + sweepPx);
+    color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge);
 
     // 三层光：screen 叠加，位置各自跟着指针漂移
     for (int i = 0; i < 3; i++) {
@@ -187,12 +178,14 @@ uniform vec2 uLightSize[3];
 uniform float uLightAmp[3];
 uniform float uDust;
 out float vBright;
+out vec2 vBoard;             // 粒子在版面坐标里的位置（px）：碎片着色器拿它查素材的 alpha
 void main() {
   // aPos 是屏幕洞内的 uv（和光的位置同一套坐标）：先摆回版面，再按素材那一路放大，最后归到画布 uv。
   // 起手放大到 5 倍多时，粒子跟着铺满整屏——它们本来就该在屏幕里，而不是钉在屏幕上不动。
   vec2 center = uHole.xy + uHole.zw * 0.5;
   vec2 boardPx = uHole.xy + aPos * uHole.zw;
   vec2 p = (center + (boardPx - center) * uBoardScale) / uRes;
+  vBoard = boardPx;
   float light = 0.0;
   for (int i = 0; i < 3; i++) {
     vec2 d = (aPos - uLightPos[i]) / uLightSize[i];
@@ -209,11 +202,20 @@ void main() {
 
 const DUST_FRAG = `#version 300 es
 precision highp float;
+uniform sampler2D uAsset;    // PC 素材
+uniform vec4 uArt;           // 素材在版面里的矩形（px）
+uniform float uAssetAlpha;   // 素材整体不透明度：显形之前它没画上去，粒子也就不该被掐
 in float vBright;
+in vec2 vBoard;              // 版面坐标（px）
 out vec4 outColor;
 void main() {
+  // 只有视频里才该有灰：素材不透明的地方是屏幕边壳与草地，按素材的 alpha 把粒子掐掉。
+  // alpha 的边是软的（屏幕洞外那圈抗锯齿），所以用一段淡出而不是硬切。
+  vec2 assetUv = (vBoard - uArt.xy) / uArt.zw;
+  float opaque = textureLod(uAsset, vec2(assetUv.x, 1.0 - assetUv.y), 0.0).a * uAssetAlpha;
+  float keep = 1.0 - smoothstep(0.45, 0.9, opaque);
   float d = length(gl_PointCoord - 0.5) * 2.0;
-  float a = (1.0 - smoothstep(0.2, 1.0, d)) * vBright;
+  float a = (1.0 - smoothstep(0.2, 1.0, d)) * vBright * keep;
   outColor = vec4(vec3(1.0), a);
 }`;
 
@@ -293,12 +295,6 @@ export type HeroState = {
   opacity: number;
   /** 素材虚焦（px）：从 BLUR 收到 0，素材是「先带糊压上来、再对焦」的 */
   blur: number;
-  /**
-   * 纸张板块（首屏之后那块）在文档里的 y（px）：滚动模糊那条带子要贴着它的上沿。
-   * 由 hero-scene.tsx 从 ScrollTrigger 的 end 拿（钉住补出来的那截占位也算在里面），
-   * 拿不到时它给的是首屏高度。别在这里推「一屏 + 一屏」——减少动态效果时没有钉住。
-   */
-  paperTop: number;
 };
 
 export function SceneCanvas({
@@ -407,11 +403,6 @@ export function SceneCanvas({
       pivot: gl.getUniformLocation(scene, "uPivot"),
       lens: gl.getUniformLocation(scene, "uLens"),
       blurPx: gl.getUniformLocation(scene, "uBlurPx"),
-      sweep: gl.getUniformLocation(scene, "uSweep"),
-      sweepBlur: gl.getUniformLocation(scene, "uSweepBlur"),
-      edgePx: gl.getUniformLocation(scene, "uEdgePx"),
-      viewTop: gl.getUniformLocation(scene, "uViewTop"),
-      viewH: gl.getUniformLocation(scene, "uViewH"),
       lightColor: gl.getUniformLocation(scene, "uLightColor"),
       lightPos: gl.getUniformLocation(scene, "uLightPos"),
       lightSize: gl.getUniformLocation(scene, "uLightSize"),
@@ -430,6 +421,9 @@ export function SceneCanvas({
       res: gl.getUniformLocation(dustProgram, "uRes"),
       hole: gl.getUniformLocation(dustProgram, "uHole"),
       boardScale: gl.getUniformLocation(dustProgram, "uBoardScale"),
+      asset: gl.getUniformLocation(dustProgram, "uAsset"),
+      art: gl.getUniformLocation(dustProgram, "uArt"),
+      assetAlpha: gl.getUniformLocation(dustProgram, "uAssetAlpha"),
       lightPos: gl.getUniformLocation(dustProgram, "uLightPos"),
       lightSize: gl.getUniformLocation(dustProgram, "uLightSize"),
       lightAmp: gl.getUniformLocation(dustProgram, "uLightAmp"),
@@ -452,7 +446,6 @@ export function SceneCanvas({
 
     // —— CSS 令牌
     const blurPx = cssNumber("--lens-blur", 9);
-    const sweepBlurPx = cssNumber("--sweep-blur", 12);
     const durationMs = cssNumber("--zoom-duration", 900);
     const baseZoom = cssNumber("--scene-zoom", 1.08);
     const maxZoom = Math.min(cssNumber("--scene-zoom-in", 1.7), cssNumber("--scene-zoom-max", 2.2));
@@ -480,8 +473,8 @@ export function SceneCanvas({
     let uploadedTime = -1;
     /** 画面当前该不该是活的（容器有没有露在视口里）；autoplay 已经让视频跑起来了，所以初值是 true */
     let awake = true;
-    /** 版面上的「一屏」高度（px），在 resize() 里量 */
-    let screenH = 0;
+    /** 素材起手放大到多少倍（在 resize() 里按版面量）：视差收幅度按「缩到多小」线性插 */
+    let growRef = 1;
     const photoCurrent = [0, 0];
     const photoTarget = [0, 0];
     const lightCurrent = LIGHTS.map(() => [0, 0]);
@@ -508,10 +501,8 @@ export function SceneCanvas({
         geom.hole.w,
         geom.hole.h,
       ]);
-      // 版面上的「一屏」高度（占位层是 100vh）：滚动模糊的进度按它算，不按 window.innerHeight——
-      // 手机上滚起来地址栏会收，innerHeight 会跳一次，模糊就不该跟着跳。它只在版面变的时候才变，
-      // 所以搭在这里量一次就够。
-      screenH = host.closest(".hero-scene")?.clientHeight ?? window.innerHeight;
+      // 起手放大倍数：视差收幅度、以及几何那套的参考值（见 follow()）。版面变了就跟着变。
+      growRef = geom.grow;
       // 点击定点缩放的起手支点 = 屏幕洞心：第一次量到几何时落在那儿，之后只跟着动画走
       if (!pivotX && !pivotY) {
         pivotX = pivotFromX = pivotToX = geom.hole.cx;
@@ -520,10 +511,19 @@ export function SceneCanvas({
     };
 
     /**
+     * 画面跟指针走的幅度系数：1 = 起手那一档（画面铺满整块版面），缩进屏幕里收到 SHRUNK_FOLLOW。
+     * 按素材缩到多小的比例线性插，于是整个缩回过程是平顺的，落定时正好收干。
+     */
+    const follow = () => {
+      const shrunk = Math.min(1, Math.max(0, (growRef - state.scale) / Math.max(growRef - 1, 1e-3)));
+      return 1 - (1 - SHRUNK_FOLLOW) * shrunk;
+    };
+
+    /**
      * 把支点夹进「放大后可见画面仍落在视频内」的区间，保证任何放大倍数都不露底。
      * 两端都夹好之后再让支点在两者之间线性走也不会越界：上界随 z 单调递减、
      * 下界随 z 单调递增，缩放往回走时可行区间只会变宽。
-     * 另外留出视差幅度当余量，免得动画途中鼠标一动就把采样推出画面外。
+     * 另外留出视差幅度当余量，免得动画途中鼠标一动就把采样推出画面外（幅度按当前那一档算）。
      * 尺寸都按屏幕（洞）来——画面是铺在洞里的，露底与否只看洞那点面积。
      */
     const clampPivot = (x: number, y: number, z: number) => {
@@ -534,10 +534,11 @@ export function SceneCanvas({
       const cover = Math.max(holeW / vw, holeH / vh);
       const dw = vw * cover;
       const dh = vh * cover;
-      const ox = (holeW - dw) / 2 - photoCurrent[0];
-      const oy = (holeH - dh) / 2 - photoCurrent[1];
-      const mx = PHOTO_PARALLAX.range[0];
-      const my = PHOTO_PARALLAX.range[1];
+      const f = follow();
+      const ox = (holeW - dw) / 2 - photoCurrent[0] * f;
+      const oy = (holeH - dh) / 2 - photoCurrent[1] * f;
+      const mx = PHOTO_PARALLAX.range[0] * f;
+      const my = PHOTO_PARALLAX.range[1] * f;
       const k = z / (z - 1);
       return {
         x: Math.min((ox + dw - holeW / z - mx) * k, Math.max((ox + mx) * k, x)),
@@ -602,13 +603,6 @@ export function SceneCanvas({
         return;
       }
 
-      // 滚动模糊（着色器里算）：一条贴着纸的上沿往上铺的模糊带，随滚动加深。
-      // · 进度按版面高度（100vh）算，不按 window.innerHeight —— 地址栏收放不会让它跳；
-      // · 纸的上沿 = 版面高 - 已经滚掉的距离（纸的起点就在首屏底下）；
-      // · 屏幕底的位置另用 rect.top + window.innerHeight 换算：画布比屏幕高、还跟着视差在动。
-      const viewH = window.innerHeight;
-      const sweep = Math.min(1, Math.max(0, window.scrollY / Math.max(screenH, 1)));
-
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
 
@@ -644,6 +638,8 @@ export function SceneCanvas({
       const boardScale = Math.max(state.scale, 1e-3);
       const assetAlpha = assetUp ? state.opacity : 0;
       const assetLod = Math.log2(1 + Math.max(0, state.blur));
+      // 画面跟指针走的幅度：缩进屏幕里之后收一档（见 SHRUNK_FOLLOW），灯光的漂移不受影响
+      const photoScale = follow();
 
       // 24fps 的视频配 60fps 的循环：同一帧不必反复上传（每帧一次 3.7MB 拷贝）
       if (video.readyState >= 2 && video.currentTime !== uploadedTime) {
@@ -669,22 +665,11 @@ export function SceneCanvas({
       gl.uniform2f(sceneLoc.res, width, height);
       gl.uniform2f(sceneLoc.buffer, canvas.width, canvas.height);
       gl.uniform2f(sceneLoc.videoSize, video.videoWidth || 16, video.videoHeight || 9);
-      gl.uniform2f(sceneLoc.photoOffset, photoCurrent[0], photoCurrent[1]);
+      gl.uniform2f(sceneLoc.photoOffset, photoCurrent[0] * photoScale, photoCurrent[1] * photoScale);
       gl.uniform1f(sceneLoc.zoom, zoom);
       gl.uniform2f(sceneLoc.pivot, pivotX, pivotY);
       gl.uniform1f(sceneLoc.lens, lens);
       gl.uniform1f(sceneLoc.blurPx, blurPx);
-      gl.uniform1f(sceneLoc.sweep, sweep);
-      gl.uniform1f(sceneLoc.sweepBlur, sweepBlurPx);
-      // 滚动模糊在着色器里按「屏幕坐标」算，而这块画布比视口大（还整体缩着）：先把视口换回画布像素。
-      // scale 是画面当前被缩到几分之一（含素材推近），rect 是变换后的框——减掉半高就是没缩过的顶边。
-      const fit = rect.width / width;
-      const canvasTop = rect.top + rect.height / 2 - (height * fit) / 2;
-      // 纸的上沿：滚动的模糊带要贴着它。取值见 HeroState.paperTop——钉住补出来的那截占位
-      // 也算在文档里，所以由 hero-scene 从 ScrollTrigger 的 end 拿，这里别自己推。
-      gl.uniform1f(sceneLoc.edgePx, (state.paperTop - window.scrollY) / fit);
-      gl.uniform1f(sceneLoc.viewTop, canvasTop / fit);
-      gl.uniform1f(sceneLoc.viewH, viewH / fit);
       gl.uniform4fv(sceneLoc.art, artRect);
       gl.uniform4fv(sceneLoc.hole, holeRect);
       gl.uniform1f(sceneLoc.boardScale, boardScale);
@@ -729,6 +714,10 @@ export function SceneCanvas({
         gl.uniform2f(dustLoc.res, width, height);
         gl.uniform4fv(dustLoc.hole, holeRect);
         gl.uniform1f(dustLoc.boardScale, boardScale);
+        // 粒子只在视频里亮：素材的 alpha 由碎片着色器查，采样器指向 1 号单元（上面绑的就是素材）
+        gl.uniform1i(dustLoc.asset, 1);
+        gl.uniform4fv(dustLoc.art, artRect);
+        gl.uniform1f(dustLoc.assetAlpha, assetAlpha);
         gl.uniform1f(dustLoc.dust, DUST_AMOUNT * (0.7 + 0.3 * lens));
         gl.drawArrays(gl.POINTS, 0, DUST_COUNT);
       }

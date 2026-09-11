@@ -37,8 +37,8 @@ const REVEAL_PX = 50;
 export function HeroScene() {
   const screenRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
-  // 初值 = 首帧：素材放到最大（洞盖满整屏）、还藏着、还糊着；paperTop 等 effect 里量准
-  const state = useRef<HeroState>({ scale: 1, opacity: 0, blur: BLUR, paperTop: 0 }).current;
+  // 初值 = 首帧：素材放到最大（洞盖满整屏）、还藏着、还糊着
+  const state = useRef<HeroState>({ scale: 1, opacity: 0, blur: BLUR }).current;
 
   useEffect(() => {
     const screen = screenRef.current;
@@ -50,19 +50,6 @@ export function HeroScene() {
     const span = () => screen.offsetHeight;
     const grow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
 
-    /**
-     * 纸张板块（首屏之后那块）在文档里的 y：滚动模糊那条带子贴着它走（见 scene-canvas 的 uEdgePx）。
-     * 钉住时首屏外面还套着 ScrollTrigger 的 .pin-spacer，一屏的占位算在文档里，纸的坐标没法推——
-     * 直接量排在首屏后面那块元素。量不到就退回「紧跟在首屏底下」（减少动态效果那条路就是这种）。
-     */
-    const measurePaper = () => {
-      const holder = screen.parentElement; // 钉住时这里是 .pin-spacer
-      const next = holder?.parentElement
-        ? Array.from(holder.parentElement.children).find((el) => el !== holder && !el.contains(screen))
-        : null;
-      state.paperTop = next ? next.getBoundingClientRect().top + window.scrollY : span();
-    };
-
     // 减少动态效果时不跟滚轮较劲：直接落在终态（素材原大小、不透明、清晰），也不钉住页面。
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       const settle = () => {
@@ -71,15 +58,9 @@ export function HeroScene() {
         state.blur = 0;
       };
       settle();
-      // 没有钉住时纸张紧跟在首屏底下，量一次就够（版面变的时候再量）
-      measurePaper();
       // 版面变了（转屏、滚动条）落点就变了，得重新量一次，不然画面会漂出屏幕
       window.addEventListener("resize", settle);
-      window.addEventListener("resize", measurePaper);
-      return () => {
-        window.removeEventListener("resize", settle);
-        window.removeEventListener("resize", measurePaper);
-      };
+      return () => window.removeEventListener("resize", settle);
     }
 
     state.scale = grow();
@@ -101,12 +82,6 @@ export function HeroScene() {
           // 起手放大倍数与模糊都按函数值现取，refresh 之后重算才是确定的，
           // 不会拿「上一次动画停在半路的值」当起点。
           invalidateOnRefresh: true,
-          // 纸张的文档位置：钉住补出来的那截占位就排在首屏底下，占位有多高由 ScrollTrigger
-          // 自己算，所以别在别处按「一屏 + 一屏」推，也别问 self.end（那是滚动的末端，
-          // 不是纸的文档坐标）——量 DOM。
-          onRefresh: () => {
-            measurePaper();
-          },
         },
       })
       // 素材缩回原大小：起手那一屏（屏幕盖满整屏、只剩画面）一路收成显示器里的一块，
