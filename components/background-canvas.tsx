@@ -222,7 +222,7 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     const quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-    const quadPos = gl.getAttribLocation(scene, "aPos");
+    const quadPos = gl.getAttribLocation(scene, "aPos");   // 只查一次
 
     const dustPosBuffer = gl.createBuffer();
     const dustSeedBuffer = gl.createBuffer();
@@ -251,15 +251,30 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
     // —— 着色器里的固定表
-    const lightColor = gl.getUniformLocation(scene, "uLightColor");
-    const lightPos = gl.getUniformLocation(scene, "uLightPos");
-    const lightSize = gl.getUniformLocation(scene, "uLightSize");
-    const lightAmp = gl.getUniformLocation(scene, "uLightAmp");
+    // 位置只查一次：每帧再 getUniformLocation/getAttribLocation 都是同步 GL 调用，白花时间
+    const sceneLoc = {
+      video: gl.getUniformLocation(scene, "uVideo"),
+      res: gl.getUniformLocation(scene, "uRes"),
+      buffer: gl.getUniformLocation(scene, "uBuffer"),
+      videoSize: gl.getUniformLocation(scene, "uVideoSize"),
+      photoOffset: gl.getUniformLocation(scene, "uPhotoOffset"),
+      zoom: gl.getUniformLocation(scene, "uZoom"),
+      pivot: gl.getUniformLocation(scene, "uPivot"),
+      lens: gl.getUniformLocation(scene, "uLens"),
+      blurPx: gl.getUniformLocation(scene, "uBlurPx"),
+      lightColor: gl.getUniformLocation(scene, "uLightColor"),
+      lightPos: gl.getUniformLocation(scene, "uLightPos"),
+      lightSize: gl.getUniformLocation(scene, "uLightSize"),
+      lightAmp: gl.getUniformLocation(scene, "uLightAmp"),
+    };
     const dustPosAttr = gl.getAttribLocation(dustProgram, "aPos");
     const dustSeedAttr = gl.getAttribLocation(dustProgram, "aSeed");
-    const dustLightPos = gl.getUniformLocation(dustProgram, "uLightPos");
-    const dustLightSize = gl.getUniformLocation(dustProgram, "uLightSize");
-    const dustLightAmp = gl.getUniformLocation(dustProgram, "uLightAmp");
+    const dustLoc = {
+      lightPos: gl.getUniformLocation(dustProgram, "uLightPos"),
+      lightSize: gl.getUniformLocation(dustProgram, "uLightSize"),
+      lightAmp: gl.getUniformLocation(dustProgram, "uLightAmp"),
+      dust: gl.getUniformLocation(dustProgram, "uDust"),
+    };
 
     const lightColors = new Float32Array(LIGHTS.flatMap((l) => toRgb(l.color)));
     const lightAmps = new Float32Array(LIGHTS.map((l) => Number(l.color.match(/\/\s*([\d.]+)%/)?.[1] ?? 30) / 100));
@@ -272,7 +287,7 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     const baseZoom = cssNumber("--scene-zoom", 1.08);
     const maxZoom = Math.min(cssNumber("--scene-zoom-in", 1.7), cssNumber("--scene-zoom-max", 2.2));
     const lensIn = cssNumber("--lens-in", 320) / 1000;
-    const lensOut = cssNumber("--lens-out", 600) / 1000;
+    const lensOut = cssNumber("--lens-out", 900) / 1000;
     const ease = bezier(0.22, 1, 0.36, 1);
 
     // —— 运行时状态（都预分配，热路径里不新建对象）
@@ -284,8 +299,12 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     let zoomFrom = baseZoom;
     let zoomTo = baseZoom;
     let zoomStart = 0;
-    let pivotX = 0;
+    let pivotX = 0;                  // 当前生效的支点
     let pivotY = 0;
+    let pivotFromX = 0;              // 本次动画的支点起点/终点
+    let pivotFromY = 0;
+    let pivotToX = 0;
+    let pivotToY = 0;
     let lens = 0;
     let lensTarget = 0;
     let uploadedTime = -1;
@@ -303,12 +322,17 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
       if (!pivotX && !pivotY) {
-        pivotX = width / 2;
-        pivotY = height / 2;
+        pivotX = pivotFromX = pivotToX = width / 2;
+        pivotY = pivotFromY = pivotToY = height / 2;
       }
     };
 
-    /** 定点缩放时把支点夹进「可见画面仍落在视频内」的区间，保证不露底 */
+    /**
+     * 把支点夹进「放大后可见画面仍落在视频内」的区间，保证任何放大倍数都不露底。
+     * 两端都夹好之后再让支点在两者之间线性走也不会越界：上界随 z 单调递减、
+     * 下界随 z 单调递增，缩放往回走时可行区间只会变宽。
+     * 另外留出视差幅度当余量，免得动画途中鼠标一动就把采样推出画面外。
+     */
     const clampPivot = (x: number, y: number, z: number) => {
       const vw = video.videoWidth || 16;
       const vh = video.videoHeight || 9;
@@ -317,9 +341,13 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       const dh = vh * cover;
       const ox = (width - dw) / 2 - photoCurrent[0];
       const oy = (height - dh) / 2 - photoCurrent[1];
+      const mx = PHOTO_PARALLAX.range[0];
+      const my = PHOTO_PARALLAX.range[1];
       const k = z / (z - 1);
-      pivotX = Math.min((ox + dw - width / z) * k, Math.max(ox * k, x));
-      pivotY = Math.min((oy + dh - height / z) * k, Math.max(oy * k, y));
+      return {
+        x: Math.min((ox + dw - width / z - mx) * k, Math.max((ox + mx) * k, x)),
+        y: Math.min((oy + dh - height / z - my) * k, Math.max((oy + my) * k, y)),
+      };
     };
 
     const onClick = (event: MouseEvent) => {
@@ -329,7 +357,18 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       zoomFrom = zoom;
       zoomTo = goingIn ? maxZoom : baseZoom;
       zoomStart = performance.now();
-      clampPivot(event.clientX, event.clientY, Math.max(zoomFrom, zoomTo));
+      // 支点不瞬间改：从当前生效的支点滑过去，否则第一帧画面就跳一下（这正是之前的卡顿）。
+      // 推进时落到点击处（那里就是放大镜中心），退回时滑回画面中心——正好回到原始构图。
+      pivotFromX = pivotX;
+      pivotFromY = pivotY;
+      if (goingIn) {
+        const target = clampPivot(event.clientX, event.clientY, maxZoom);
+        pivotToX = target.x;
+        pivotToY = target.y;
+      } else {
+        pivotToX = width / 2;
+        pivotToY = height / 2;
+      }
       lensTarget = goingIn ? 1 : 0;
     };
 
@@ -353,8 +392,15 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       // 缩放缓动
       if (zoom !== zoomTo) {
         const t = Math.min(1, (now - zoomStart) / durationMs);
-        zoom = zoomFrom + (zoomTo - zoomFrom) * ease(t);
-        if (t >= 1) zoom = zoomTo;
+        const k = ease(t);
+        zoom = zoomFrom + (zoomTo - zoomFrom) * k;
+        pivotX = pivotFromX + (pivotToX - pivotFromX) * k;
+        pivotY = pivotFromY + (pivotToY - pivotFromY) * k;
+        if (t >= 1) {
+          zoom = zoomTo;
+          pivotX = pivotFromX = pivotToX;
+          pivotY = pivotFromY = pivotToY;
+        }
       }
       // 镜头：进得快、退得稳
       if (lens < lensTarget) lens = Math.min(lensTarget, lens + dt / lensIn);
@@ -382,21 +428,21 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       gl.bindBuffer(gl.ARRAY_BUFFER, quad);
       gl.enableVertexAttribArray(quadPos);
       gl.vertexAttribPointer(quadPos, 2, gl.FLOAT, false, 0, 0);
-      gl.uniform1i(gl.getUniformLocation(scene, "uVideo"), 0);
+      gl.uniform1i(sceneLoc.video, 0);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.uniform2f(gl.getUniformLocation(scene, "uRes"), width, height);
-      gl.uniform2f(gl.getUniformLocation(scene, "uBuffer"), canvas.width, canvas.height);
-      gl.uniform2f(gl.getUniformLocation(scene, "uVideoSize"), video.videoWidth || 16, video.videoHeight || 9);
-      gl.uniform2f(gl.getUniformLocation(scene, "uPhotoOffset"), photoCurrent[0], photoCurrent[1]);
-      gl.uniform1f(gl.getUniformLocation(scene, "uZoom"), zoom);
-      gl.uniform2f(gl.getUniformLocation(scene, "uPivot"), pivotX, pivotY);
-      gl.uniform1f(gl.getUniformLocation(scene, "uLens"), lens);
-      gl.uniform1f(gl.getUniformLocation(scene, "uBlurPx"), blurPx);
-      gl.uniform3fv(lightColor, lightColors);
-      gl.uniform2fv(lightPos, lightPosUv);
-      gl.uniform2fv(lightSize, lightSizes);
-      gl.uniform1fv(lightAmp, lightAmps);
+      gl.uniform2f(sceneLoc.res, width, height);
+      gl.uniform2f(sceneLoc.buffer, canvas.width, canvas.height);
+      gl.uniform2f(sceneLoc.videoSize, video.videoWidth || 16, video.videoHeight || 9);
+      gl.uniform2f(sceneLoc.photoOffset, photoCurrent[0], photoCurrent[1]);
+      gl.uniform1f(sceneLoc.zoom, zoom);
+      gl.uniform2f(sceneLoc.pivot, pivotX, pivotY);
+      gl.uniform1f(sceneLoc.lens, lens);
+      gl.uniform1f(sceneLoc.blurPx, blurPx);
+      gl.uniform3fv(sceneLoc.lightColor, lightColors);
+      gl.uniform2fv(sceneLoc.lightPos, lightPosUv);
+      gl.uniform2fv(sceneLoc.lightSize, lightSizes);
+      gl.uniform1fv(sceneLoc.lightAmp, lightAmps);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
       // —— 灰尘粒子：只在光里亮，加法混合叠上去
@@ -425,10 +471,10 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
           gl.enableVertexAttribArray(dustSeedAttr);
           gl.vertexAttribPointer(dustSeedAttr, 1, gl.FLOAT, false, 0, 0);
         }
-        gl.uniform2fv(dustLightPos, lightPosUv);
-        gl.uniform2fv(dustLightSize, lightSizes);
-        gl.uniform1fv(dustLightAmp, lightAmps);
-        gl.uniform1f(gl.getUniformLocation(dustProgram, "uDust"), DUST_AMOUNT * (0.7 + 0.3 * lens));
+        gl.uniform2fv(dustLoc.lightPos, lightPosUv);
+        gl.uniform2fv(dustLoc.lightSize, lightSizes);
+        gl.uniform1fv(dustLoc.lightAmp, lightAmps);
+        gl.uniform1f(dustLoc.dust, DUST_AMOUNT * (0.7 + 0.3 * lens));
         gl.drawArrays(gl.POINTS, 0, DUST_COUNT);
       }
     };

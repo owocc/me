@@ -123,7 +123,7 @@
   --zoom-ease: cubic-bezier(0.22, 1, 0.36, 1);
   /* 镜头畸变与折射高光：放大态持续存在，进得快、退得稳。 */
   --lens-in: 320ms;
-  --lens-out: 600ms;
+  --lens-out: 900ms;
   /* 四周失焦的模糊半径（越小越轻）。 */
   --lens-blur: 9px;
   --sidebar: oklch(0.985 0 0);
