@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 
 /**
- * 背景场景（WebGL2 一块画布）：视频铺满 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子。
+ * 首屏场景（WebGL2 一块画布）：视频铺满 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子。
  *
  * 为什么从 DOM 换成画布：原先畸变走 SVG feDisplacementMap、四周失焦走 backdrop-filter，
  * 画面里只要有 <video>，这两层滤镜就得逐帧把视频喂进滤镜管线——实测放大态 50ms/帧（约 20fps）。
@@ -12,8 +12,12 @@ import { useEffect, useRef } from "react";
  *
  * 分工：
  *   · 视差、缩放缓动、镜头淡入淡出、粒子漂移都在这里的 rAF 里算；
+ *   · 滚动模糊（画面从屏幕底部往上糊、随滚动加深）在片段着色器里算，见 FRAG 里的 uSweep；
+ *   · 尺寸只认自己那个容器的框（首屏里那层会动的画布，见 hero-scene.tsx）：容器是一屏加底下一截余量，
+ *     不铺到整页；指针/点击也只认容器内的坐标，滚到下面的板块上时画面不再跟着动；
  *   · 视频只是纹理来源：元素铺在画布下面（保持可见→浏览器不会掐掉解码，被画布盖住→看不见）；
- *   · 画布拿不到 WebGL2 时它自己隐藏，底下那段视频就是兜底背景。
+ *   · 画布拿不到 WebGL2 时它自己隐藏，底下那段视频就是兜底背景；
+ *   · 容器整块滚出视野就停画（视频也一起暂停），看不见的场景不该一直烧 CPU。
  */
 
 /** 三层光。origin/size/range 都是视口比例，和原来 CSS 里的写法一一对应。 */
@@ -48,10 +52,20 @@ uniform float uZoom;
 uniform vec2 uPivot;         // px
 uniform float uLens;         // 0..1
 uniform float uBlurPx;
+uniform float uSweep;        // 0..1：往下滚了多少（一屏 = 1）
+uniform float uSweepBlur;    // 滚到底那一档的最大模糊半径（px）
+uniform float uEdgePx;       // 纸的上沿在屏幕上的 y（px，0 = 屏幕顶）
+uniform float uViewTop;      // 画面层顶边在视口里的 y（px）
+uniform float uViewH;        // 视口高（px）
 uniform vec3 uLightColor[3];
 uniform vec2 uLightPos[3];   // uv
 uniform vec2 uLightSize[3];  // uv 半轴
 uniform float uLightAmp[3];
+
+// 滚动模糊：一条贴着纸上沿往上铺的模糊带——越靠近纸越糊，往上渐清晰，整条随滚动加深。
+// 之所以贴着纸的上沿而不是屏幕底：纸盖上来以后屏幕底下那半截早被纸挡住了，
+// 把最糊的一段放在那儿等于白糊；纸的上沿才是「画面还露着的最下边」。
+const float SWEEP_BAND = 0.4;   // 模糊带高度（占视口高的比例）
 
 out vec4 outColor;
 
@@ -89,7 +103,14 @@ void main() {
   float edge = smoothstep(0.25, 1.0, radius);
   vec2 warpedUv = screenUv - (screenUv - 0.5) * (0.18 * uLens * edge);
 
-  vec3 color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge);
+  // 滚动模糊：vy 是像素在屏幕上的位置（0 = 屏幕顶，1 = 屏幕底）。
+  // uViewTop 是画布顶边在视口里的 y，加它才是屏幕坐标（减号会把整幅画面推到屏幕底下去）。
+  float vy = (screenUv.y * uRes.y + uViewTop) / max(uViewH, 1.0);
+  float edgeVy = uEdgePx / max(uViewH, 1.0);
+  float sweepT = clamp(1.0 - (edgeVy - vy) / SWEEP_BAND, 0.0, 1.0);
+  float sweepPx = uSweep * uSweepBlur * sweepT;
+
+  vec3 color = sampleVideo(videoUv(warpedUv), uBlurPx * uLens * edge + sweepPx);
 
   // 三层光：screen 叠加，位置各自跟着指针漂移
   for (int i = 0; i < 3; i++) {
@@ -140,7 +161,7 @@ function compile(gl: WebGL2RenderingContext, type: number, source: string): WebG
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return shader;
-  console.warn("[bg-canvas] 着色器编译失败:", gl.getShaderInfoLog(shader));
+  console.warn("[scene-canvas] 着色器编译失败:", gl.getShaderInfoLog(shader));
   gl.deleteShader(shader);
   return null;
 }
@@ -157,7 +178,7 @@ function link(gl: WebGL2RenderingContext, vert: string, frag: string): WebGLProg
   gl.deleteShader(vs);
   gl.deleteShader(fs);
   if (gl.getProgramParameter(program, gl.LINK_STATUS)) return program;
-  console.warn("[bg-canvas] 程序链接失败:", gl.getProgramInfoLog(program));
+  console.warn("[scene-canvas] 程序链接失败:", gl.getProgramInfoLog(program));
   gl.deleteProgram(program);
   return null;
 }
@@ -199,20 +220,22 @@ function bezier(p1x: number, p1y: number, p2x: number, p2y: number) {
   };
 }
 
-export function BackgroundCanvas({ src, poster }: { src: string; poster: string }) {
+export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
+  const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
+    const host = hostRef.current;
     const canvas = canvasRef.current;
     const video = videoRef.current;
-    if (!canvas || !video) return;
+    if (!host || !canvas || !video) return;
 
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "high-performance" });
     const scene = gl ? link(gl, VERT, FRAG) : null;
     const dustProgram = gl ? link(gl, DUST_VERT, DUST_FRAG) : null;
     if (!gl || !scene || !dustProgram) {
-      canvas.style.display = "none"; // 兜底：底下那段视频就是背景
+      canvas.style.display = "none"; // 兜底：底下那段视频就是画面
       return;
     }
 
@@ -262,6 +285,11 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       pivot: gl.getUniformLocation(scene, "uPivot"),
       lens: gl.getUniformLocation(scene, "uLens"),
       blurPx: gl.getUniformLocation(scene, "uBlurPx"),
+      sweep: gl.getUniformLocation(scene, "uSweep"),
+      sweepBlur: gl.getUniformLocation(scene, "uSweepBlur"),
+      edgePx: gl.getUniformLocation(scene, "uEdgePx"),
+      viewTop: gl.getUniformLocation(scene, "uViewTop"),
+      viewH: gl.getUniformLocation(scene, "uViewH"),
       lightColor: gl.getUniformLocation(scene, "uLightColor"),
       lightPos: gl.getUniformLocation(scene, "uLightPos"),
       lightSize: gl.getUniformLocation(scene, "uLightSize"),
@@ -283,6 +311,7 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
 
     // —— CSS 令牌
     const blurPx = cssNumber("--lens-blur", 9);
+    const sweepBlurPx = cssNumber("--sweep-blur", 12);
     const durationMs = cssNumber("--zoom-duration", 900);
     const baseZoom = cssNumber("--scene-zoom", 1.08);
     const maxZoom = Math.min(cssNumber("--scene-zoom-in", 1.7), cssNumber("--scene-zoom-max", 2.2));
@@ -308,6 +337,10 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     let lens = 0;
     let lensTarget = 0;
     let uploadedTime = -1;
+    /** 画面当前该不该是活的（容器有没有露在视口里）；autoplay 已经让视频跑起来了，所以初值是 true */
+    let awake = true;
+    /** 版面上的「一屏」高度（px），在 resize() 里量 */
+    let screenH = 0;
     const photoCurrent = [0, 0];
     const photoTarget = [0, 0];
     const lightCurrent = LIGHTS.map(() => [0, 0]);
@@ -316,11 +349,17 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     const resize = () => {
       // 画布按 1:1 设备像素画：内容本身是 1280 宽的视频，放大到高 DPR 看不出差别，
       // 却要按面积多花几倍填充率（软件光栅化时尤其明显）。
+      // 尺寸取自容器而不是视口：容器就是首屏里那层画布，场景才跟着它走。
       const dpr = 1;
-      width = window.innerWidth;
-      height = window.innerHeight;
+      const rect = host.getBoundingClientRect();
+      width = rect.width;
+      height = rect.height;
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
+      // 版面上的「一屏」高度（占位层是 100vh）：滚动模糊的进度按它算，不按 window.innerHeight——
+      // 手机上滚起来地址栏会收，innerHeight 会跳一次，模糊就不该跟着跳。它只在版面变的时候才变，
+      // 所以搭在这里量一次就够。
+      screenH = host.closest(".hero-scene")?.clientHeight ?? window.innerHeight;
       if (!pivotX && !pivotY) {
         pivotX = pivotFromX = pivotToX = width / 2;
         pivotY = pivotFromY = pivotToY = height / 2;
@@ -362,9 +401,11 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       pivotFromX = pivotX;
       pivotFromY = pivotY;
       if (goingIn) {
-        const target = clampPivot(event.clientX, event.clientY, maxZoom);
-        pivotToX = target.x;
-        pivotToY = target.y;
+        // 点击坐标是视口的，画布的支点是容器内的：减去容器左上角，往下滚过也不会错位
+        const rect = host.getBoundingClientRect();
+        const spot = clampPivot(event.clientX - rect.left, event.clientY - rect.top, maxZoom);
+        pivotToX = spot.x;
+        pivotToY = spot.y;
       } else {
         pivotToX = width / 2;
         pivotToY = height / 2;
@@ -374,8 +415,9 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
 
     const onPointerMove = (event: PointerEvent) => {
       if (reduced) return;
-      const nx = (event.clientX / width - 0.5) * 2;
-      const ny = (event.clientY / height - 0.5) * 2;
+      const rect = host.getBoundingClientRect();
+      const nx = ((event.clientX - rect.left) / width - 0.5) * 2;
+      const ny = ((event.clientY - rect.top) / height - 0.5) * 2;
       photoTarget[0] = nx * PHOTO_PARALLAX.range[0] * PHOTO_PARALLAX.direction;
       photoTarget[1] = ny * PHOTO_PARALLAX.range[1] * PHOTO_PARALLAX.direction;
       for (let i = 0; i < LIGHTS.length; i++) {
@@ -386,6 +428,31 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
 
     const render = (now: number) => {
       frame = requestAnimationFrame(render);
+
+      // 容器整块离开视口（含正好贴着上/下边缘）就不画：这块场景在软件光栅化下也要 30fps，
+      // 下面还有别的板块时，没必要烧在看不见的地方；视频也一起停，别白解码。
+      // 判据是容器自己的框，一帧一次 getBoundingClientRect——这块页面自己不动 DOM，布局是干净的，
+      // 而且不用 IntersectionObserver：贴边那种零面积相交浏览器算作「还相交」，回调不一定来，
+      // 正好停在交界上就白跑了。
+      const rect = host.getBoundingClientRect();
+      const onScreen = rect.bottom > 0 && rect.top < window.innerHeight;
+      if (onScreen !== awake) {
+        awake = onScreen;
+        if (awake) void video.play().catch(() => {});
+        else video.pause();
+      }
+      if (!awake) {
+        last = now; // 回来时 dt 不跳
+        return;
+      }
+
+      // 滚动模糊（着色器里算）：一条贴着纸的上沿往上铺的模糊带，随滚动加深。
+      // · 进度按版面高度（100vh）算，不按 window.innerHeight —— 地址栏收放不会让它跳；
+      // · 纸的上沿 = 版面高 - 已经滚掉的距离（纸的起点就在首屏底下）；
+      // · 屏幕底的位置另用 rect.top + window.innerHeight 换算：画布比屏幕高、还跟着视差在动。
+      const viewH = window.innerHeight;
+      const sweep = Math.min(1, Math.max(0, window.scrollY / Math.max(screenH, 1)));
+
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
 
@@ -439,6 +506,11 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       gl.uniform2f(sceneLoc.pivot, pivotX, pivotY);
       gl.uniform1f(sceneLoc.lens, lens);
       gl.uniform1f(sceneLoc.blurPx, blurPx);
+      gl.uniform1f(sceneLoc.sweep, sweep);
+      gl.uniform1f(sceneLoc.sweepBlur, sweepBlurPx);
+      gl.uniform1f(sceneLoc.edgePx, screenH - window.scrollY);
+      gl.uniform1f(sceneLoc.viewTop, rect.top);
+      gl.uniform1f(sceneLoc.viewH, viewH);
       gl.uniform3fv(sceneLoc.lightColor, lightColors);
       gl.uniform2fv(sceneLoc.lightPos, lightPosUv);
       gl.uniform2fv(sceneLoc.lightSize, lightSizes);
@@ -480,16 +552,20 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     };
 
     resize();
-    window.addEventListener("resize", resize);
-    window.addEventListener("click", onClick);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    // 尺寸跟着容器走：转屏、滚动条出现/消失、版面上别的板块把首屏挤窄，容器都会重新量一次，
+    // 画布始终和首屏区块严丝合缝。
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(host);
+    // 监听挂在容器上（不是 window）：首屏滚上去之后，指针和点击都落不到这块场景上。
+    host.addEventListener("click", onClick);
+    host.addEventListener("pointermove", onPointerMove, { passive: true });
     frame = requestAnimationFrame(render);
 
     return () => {
       cancelAnimationFrame(frame);
-      window.removeEventListener("resize", resize);
-      window.removeEventListener("click", onClick);
-      window.removeEventListener("pointermove", onPointerMove);
+      resizeObserver.disconnect();
+      host.removeEventListener("click", onClick);
+      host.removeEventListener("pointermove", onPointerMove);
       gl.deleteTexture(texture);
       gl.deleteBuffer(quad);
       gl.deleteBuffer(dustPosBuffer);
@@ -500,7 +576,7 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
   }, [src]);
 
   return (
-    <div className="absolute inset-0">
+    <div ref={hostRef} className="absolute inset-0">
       {/* 视频铺在画布下面：保持可见→浏览器不掐解码，被画布盖住→看不见；也当无 WebGL 时的兜底 */}
       <video
         ref={videoRef}
