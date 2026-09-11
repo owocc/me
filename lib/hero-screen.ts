@@ -4,6 +4,12 @@
  *
  * hero-scene.tsx 拿它算「起手放大多少倍」，scene-canvas.tsx 拿它把窗口与素材摆进着色器：
  * 两处共用这一份，免得各算一套、越走越远。长度单位都是版面 px。
+ *
+ * 画面（视频）怎么铺进那块窗口有两套取景，见 {@link videoRect}：
+ *   · 贴屏幕：视频 cover 铺进 4:3 的窗口（屏幕就是 4:3 的，16:9 的视频于是左右各裁掉一截）；
+ *   · 铺满：视频 cover 铺进「画布真正露在视口里的那一块」（见 {@link visibleFrame}），
+ *     只按屏幕比例裁最少的一点——16:9 的屏幕上几乎一点都不裁。
+ * 两套都由这里算出「视频那块矩形在版面里的位置与大小」，着色器只做一次 uv 采样。
  */
 
 /**
@@ -61,6 +67,75 @@ export function heroGeometry(boxW: number, boxH: number): HeroGeometry {
     (2 * Math.max(hole.cy, boxH - hole.cy)) / (hole.h + 2 * pad),
   );
   return { art, hole, pad, grow };
+}
+
+/** 版面里的一块矩形（px）。视频那两套取景、可见取景框都用它。 */
+export type Rect = { x: number; y: number; w: number; h: number };
+
+/**
+ * 取景框外扩的一圈（画布 px）：满屏取景是按「露在视口里的那一块」算的，
+ * 但那一块是靠 getBoundingClientRect / offsetWidth 量出来的，与浏览器最后画上去的那几行像素
+ * 之间有亚像素取整、滚动条那点缝，画面边缘贴得太死会抽到画面外（CLAMP 拉出一条边）。
+ * 外扩这一圈兜住它，代价是比例上多裁不到 1%。
+ */
+export const VIEW_OVERSCAN = 12;
+
+/**
+ * 满屏取景要贴的那块框：画布当前真正露在视口里的那一块（canvas，画布 px），绕缩放支点
+ * 逆着版面放大倍数映回版面坐标——与着色器里 `board = uZoomAnchor + (px - uZoomAnchor) / uBoardScale` 同一套算法。
+ *
+ * 注意是「露在视口里的那一块」，不是整块画布：画布比一屏高（底下还有 --hero-bleed 给撕口留的余量），
+ * 拿整块画布去 cover 的话长宽比接近 4:3，16:9 的视频照样要裁掉四分之一，等于白改。
+ */
+export function visibleFrame(
+  out: Rect,
+  scale: number,
+  anchorX: number,
+  anchorY: number,
+  canvas: Rect,
+): Rect {
+  const k = Math.max(scale, 1e-3);
+  const half = VIEW_OVERSCAN / 2;
+  out.x = anchorX + (canvas.x - half - anchorX) / k;
+  out.y = anchorY + (canvas.y - half - anchorY) / k;
+  out.w = (canvas.w + VIEW_OVERSCAN) / k;
+  out.h = (canvas.h + VIEW_OVERSCAN) / k;
+  return out;
+}
+
+/**
+ * 视频按 cover 铺进一块取景框之后，视频自己那块矩形在版面里的位置与大小（px）。
+ * 着色器于是只要 `uv = (board - rect.xy) / rect.zw` 一次采样：视差、定点缩放都算进了这个矩形里。
+ *
+ * cover：框比视频「宽」就按宽铺满、上下裁，否则按高铺满、左右裁——和 object-fit: cover 一个算法，
+ * 裁的是多出来的那一边。框就是 {@link visibleFrame} 那块时，裁掉的就只剩屏幕与视频比例差的那一点。
+ *
+ * 顺序与原来着色器里那段等价（先 cover 居中、再叠视差、最后绕支点放大）：
+ * 视差只叠一次，不跟着 zoom 一起放大；缩放绕支点，于是支点那个点不动。
+ * 用 out 数组写出（Float32Array(4) 直接喂 uniform4fv），热路径里不新建对象。
+ */
+export function videoRect(
+  out: Float32Array,
+  frame: Rect,
+  videoW: number,
+  videoH: number,
+  pivotX: number,
+  pivotY: number,
+  zoom: number,
+  parallaxX: number,
+  parallaxY: number,
+): Float32Array {
+  const cover = Math.max(frame.w / videoW, frame.h / videoH);
+  const displayedW = videoW * cover;
+  const displayedH = videoH * cover;
+  // 未缩放时视频在框里居中，再往指针反方向推一点（视差）
+  const originX = frame.x + (frame.w - displayedW) * 0.5 - parallaxX;
+  const originY = frame.y + (frame.h - displayedH) * 0.5 - parallaxY;
+  out[0] = pivotX + (originX - pivotX) * zoom;
+  out[1] = pivotY + (originY - pivotY) * zoom;
+  out[2] = displayedW * zoom;
+  out[3] = displayedH * zoom;
+  return out;
 }
 
 /**

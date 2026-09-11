@@ -57,6 +57,10 @@ function useIsMobile() {
  * 钉住不是靠 ScrollTrigger，就是这里手写的——页面真滚起来的话，满屏的画面会直接滚出屏幕，
  * 收起动画在看不见的地方播完，回来时状态还停在「已展开」，等于坏在半路。
  *
+ * 展开时除了放大倍数，还写 state.framing：0 = 画面贴屏幕（按 4:3 的屏幕洞 cover，16:9 的视频
+ * 左右各裁一截），1 = 铺满视口（按屏幕比例 cover，只裁屏幕与视频比例差的那一点）。
+ * 于是放大到满屏之后看到的是整幅画面，不再被屏幕的 4:3 裁掉两边（见 scene-canvas 的 framingUv）。
+ *
  * 手机那一档（{@link MOBILE}）另走一条路：不缩放、不起手放大，显示器与画面一起摆好
  * （state 直接落在终态），滚轮直接往下走。桌面端才做「双击放大」那一套。
  *
@@ -70,9 +74,10 @@ export function HeroScene() {
   const mobile = useIsMobile();
 
   // 初始状态：不管什么设备，固定一进入页面就完整显示电脑素材（清晰、不透明、原比例）
-  // 手机端略做 1.1 微调裁切防下边框黑线，桌面端为 1.0
+  // 手机端略做 1.1 微调裁切防下边框黑线，桌面端为 1.0；
+  // 取景固定在「贴屏幕」那一档（framing = 0），只有展开到满屏才切到「铺满视口」（见 expandToFullscreen）
   const defaultScale = mobile ? MOBILE_SCALE : 1.0;
-  const state = useRef<HeroState>({ scale: defaultScale, opacity: 1, blur: 0 }).current;
+  const state = useRef<HeroState>({ scale: defaultScale, opacity: 1, blur: 0, framing: 0 }).current;
 
   // 运行状态引用
   const isExpandedRef = useRef(false);
@@ -88,6 +93,7 @@ export function HeroScene() {
     state.scale = baseScale;
     state.opacity = 1;
     state.blur = 0;
+    state.framing = 0;
 
     const getGrow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
 
@@ -114,6 +120,9 @@ export function HeroScene() {
         onUpdate: () => {
           const p = animObj.progress;
           state.scale = baseScale + (targetScale - baseScale) * p;
+          // 取景跟着一起走：倍数是「画面占多大」，取景是「画面按谁的比例铺」——
+          // 到 100% 时按屏幕比例 cover，于是只裁掉屏幕与视频比例差的那一点（见 scene-canvas 的 framingUv）
+          state.framing = p;
           // 到达 80% 进度后开始降低透明度，100% 时降为 0
           if (p >= 0.8) {
             state.opacity = Math.max(0, 1 - (p - 0.8) / 0.2);
@@ -123,6 +132,7 @@ export function HeroScene() {
         },
         onComplete: () => {
           state.scale = targetScale;
+          state.framing = 1;
           state.opacity = 0;
           isExpandedRef.current = true;
           isAnimatingRef.current = false;
@@ -145,6 +155,8 @@ export function HeroScene() {
         onUpdate: () => {
           const p = animObj.progress;
           state.scale = startScale + (baseScale - startScale) * p;
+          // 取景倒着走回「贴屏幕」那一档
+          state.framing = 1 - p;
           // 从全屏收起：倒推回来，p < 0.2 时透明度从 0 升到 1（即还原到 80% 缩放位置时素材已完全不透明）
           if (p <= 0.2) {
             state.opacity = Math.min(1, p / 0.2);
@@ -155,6 +167,7 @@ export function HeroScene() {
         onComplete: () => {
           state.scale = baseScale;
           state.opacity = 1;
+          state.framing = 0;
           isExpandedRef.current = false;
           isAnimatingRef.current = false;
           virtualScrollYRef.current = 0;
@@ -297,8 +310,10 @@ export function HeroScene() {
     const handleResize = () => {
       if (isExpandedRef.current && !isAnimatingRef.current) {
         state.scale = getGrow();
+        state.framing = 1;
       } else if (!isExpandedRef.current && !isAnimatingRef.current) {
         state.scale = mobile ? MOBILE_SCALE : 1.0;
+        state.framing = 0;
       }
     };
 

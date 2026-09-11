@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 
-import { ART_RATIO, heroGeometry, hitsScreenHole } from "@/lib/hero-screen";
+import { ART_RATIO, heroGeometry, hitsScreenHole, videoRect, visibleFrame, type Rect } from "@/lib/hero-screen";
 
 /**
  * 首屏场景（WebGL2 一块画布）：视频 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子，
@@ -21,6 +21,9 @@ import { ART_RATIO, heroGeometry, hitsScreenHole } from "@/lib/hero-screen";
  *   · 视差、缩放缓动、镜头淡入淡出、粒子漂移都在这里的 rAF 里算；
  *   · 画面不加彩色光罩：亮处只揉一层无色的柔光（bloom），光晕只用来决定灰尘在哪亮；
  *   · 素材的放大/显形/虚焦由 hero-scene.tsx 的滚动动画写进 state，这里每帧读（普通对象，不走 React）；
+ *   · 画面的取景有两套，由 state.framing 在两套之间插值：贴屏幕（按 4:3 的屏幕洞 cover）与
+ *     铺满视口（按屏幕比例 cover，只裁比例差的那一点，见 framingUv）。两套都是「把视频按 cover
+ *     铺进一块版面矩形」，矩形由 lib/hero-screen.ts 的 videoRect() 算好，着色器只做一次采样；
  *   · 画面按 cover 铺满屏幕（不裁不拉之外不留黑边——首屏整屏都是画面）；
  *   · 画布就是整个首屏版面（一屏 + 底下的 --hero-bleed）：素材按 cover 铺满，屏幕窗口的位置
  *     与大小照 lib/hero-screen.ts 里量好的比例算，两边共用同一份几何；
@@ -52,6 +55,14 @@ const PHOTO_PARALLAX = { range: [18, 12], ease: 0.07, direction: -1 } as const;
  */
 const SHRUNK_FOLLOW = 0.4;
 
+/**
+ * 满屏取景那一路的视差系数。视差是「屏幕 px 的位移」，而满屏那路是紧贴的 cover
+ * （视频正好铺满可见的那一屏，四面全靠 VIEW_OVERSCAN 那点余量兜着），照原幅度推最多 12px，
+ * 会把边上一条推出画面之外（CLAMP 拉出竖条）。压到 1/4（最多 3px）既留住了跟手，也还在余量以内。
+ * 贴屏幕那一路不动它：画面缩在 4:3 的屏幕里，原幅度是调过的。
+ */
+const FULL_PARALLAX = 0.25;
+
 const DUST_COUNT = 220;
 /** 粒子整体亮度（0..1），想更明显就调大。 */
 const DUST_AMOUNT = 1;
@@ -69,10 +80,6 @@ uniform sampler2D uVideo;
 uniform sampler2D uAsset;    // PC 素材（显示器 + 草地…），屏幕那块洞是全透明的
 uniform vec2 uRes;        // 版面（画布）CSS 像素
 uniform vec2 uBuffer;     // 绘制缓冲像素（gl_FragCoord 的量纲，含 DPR）
-uniform vec2 uVideoSize;
-uniform vec2 uPhotoOffset;   // px（屏幕内视差）
-uniform float uZoom;         // 点击定点缩放的倍数
-uniform vec2 uPivot;         // px（屏幕内坐标）
 uniform float uLens;         // 0..1
 uniform float uBlurPx;
 // 素材与屏幕洞：都是版面 px 的矩形（x, y, w, h），见 lib/hero-screen.ts。
@@ -85,6 +92,13 @@ uniform float uAssetAlpha;   // 素材整体不透明度（0..1），滚过开�
 uniform float uAssetLod;     // 素材显形那层虚焦：mip 层数（0 = 原图，越大越糊）
 uniform float uHolePad;      // 窗口比玻璃小出来的那一圈（px，见 lib/hero-screen.ts 的 pad）
 uniform vec2 uZoomAnchor;    // 缩放支点（版面 px）：绕它放大/缩小整个版面
+// 画面（视频）的取景：两路各是一块「把视频按 cover 铺进去」的版面矩形（x, y, w, h，px），
+// 由 lib/hero-screen.ts 的 videoRect() 按 cover + 视差 + 定点缩放算好，着色器只做一次采样。
+// uRectRest 的框是屏幕那块洞（视频就裁在屏幕里）；uRectFull 的框是画布露在视口里的那一块，
+// 于是只按屏幕比例裁最少的一点（16:9 的屏幕上几乎不裁）。uFraming 在两路之间插值，见 framingUv。
+uniform vec4 uRectRest;
+uniform vec4 uRectFull;
+uniform float uFraming;      // 0 = 贴屏幕，1 = 铺满视口
 
 /** 素材固有宽度（px）：把 mip 层数换回版面 px 用，见 grow。 */
 const float ASSET_W = 2200.0;
@@ -96,29 +110,28 @@ const float BLOOM_FLOOR = 0.45;   // 低于这个亮度不发光
 
 out vec4 outColor;
 
-// 屏幕 uv（y 向下）→ 视频 uv（含 cover 摆放、视差、定点缩放）。框就是屏幕那块洞：
-// 画面按 cover 铺满它，不裁不拉之外的黑边一概不留（首屏整屏都是画面）。
-vec2 videoUv(vec2 frameUv) {
-  vec2 frameRes = uHole.zw;
-  vec2 px = frameUv * frameRes;
-  vec2 zoomed = uPivot + (px - uPivot) / uZoom;
-  float cover = max(frameRes.x / uVideoSize.x, frameRes.y / uVideoSize.y);
-  vec2 displayed = uVideoSize * cover;
-  vec2 origin = (frameRes - displayed) * 0.5 - uPhotoOffset;
-  return (zoomed - origin) / displayed;
+// 版面 px → 视频 uv。两路取景各是一块矩形（cover 摆放、视差、定点缩放都已经算进矩形里），
+// 按 uFraming 线性混合：同一支点、同一个视频，混合相当于把取景框在中间插值——
+// 两路的「点尺寸」长宽比本来就一样（都是这份视频的 vh/vw），所以混出来只是缩放变了、不会拉歪；
+// 而可见的那几行像素在两路里都落在 0..1 内，混出来也就在 0..1 内，不会抽到画面外。
+vec2 framingUv(vec2 board) {
+  vec2 rest = (board - uRectRest.xy) / uRectRest.zw;
+  vec2 full = (board - uRectFull.xy) / uRectFull.zw;
+  return mix(rest, full, uFraming);
 }
 
 // 屏幕 uv 是 y 向下，纹理由 UNPACK_FLIP_Y_WEBGL 上传后图的顶边在 v=1，采样时翻回来
 vec3 tex(vec2 uv) { return texture(uVideo, vec2(uv.x, 1.0 - uv.y)).rgb; }
 
-vec3 sampleVideo(vec2 uv, float blurPx) {
+// invScale 是「一个版面 px 等于多少 uv」：半径按版面 px 给，采样步就得按当前那路取景换算
+// （两路取景框大小不同，uv 步长跟着不同，混一下才对得上）。
+vec3 sampleVideo(vec2 uv, float blurPx, vec2 invScale) {
   if (blurPx < 0.01) return tex(uv);
   vec3 sum = tex(uv);
   for (int i = 0; i < 7; i++) {
     float a = float(i) * 2.399963;                       // 黄金角：7 个方向不重复
     float r = blurPx * (0.35 + 0.65 * float(i) / 6.0);
-    // 半径按屏幕（洞）归一，别按整块画布：画布比屏幕大，按它归一采样步就偏小
-    sum += tex(uv + vec2(cos(a), sin(a)) * r / uHole.zw);
+    sum += tex(uv + vec2(cos(a), sin(a)) * r * invScale);
   }
   return sum / 8.0;
 }
@@ -160,13 +173,17 @@ void main() {
     vec2 centered = (frameUv - 0.5) * vec2(aspect, 1.0);
     float radius = clamp(length(centered) / (0.5 * length(vec2(aspect, 1.0))), 0.0, 1.0);
     float edge = smoothstep(0.25, 1.0, radius);
-    vec2 warpedUv = frameUv - (frameUv - 0.5) * (0.18 * uLens * edge);
+    // 畸变就是绕屏幕中心均匀缩一下。原来写在屏幕 uv 上，现在在版面坐标里做同一件事——
+    // 因为取景框已经不一定是屏幕洞了（满屏时是视口），这一步不能再挂在屏幕 uv 上。
+    vec2 holeCenter = uHole.xy + uHole.zw * 0.5;
+    vec2 warped = holeCenter + (board - holeCenter) * (1.0 - 0.18 * uLens * edge);
 
     // 失焦与柔光的半径都按屏幕 px 算：除以放大倍数，缩到哪一档看上去都一样柔。
     // （放大态下不除，边缘那圈 blur 会跟着放大成一片糊，正是之前「边缘糊在一起」的来源。）
-    vec2 vuv = videoUv(warpedUv);
-    vec3 base = sampleVideo(vuv, (uBlurPx * uLens * edge) / uBoardScale);
-    vec3 soft = sampleVideo(vuv, BLOOM_PX / uBoardScale);
+    vec2 invScale = mix(1.0 / uRectRest.zw, 1.0 / uRectFull.zw, uFraming);
+    vec2 vuv = framingUv(warped);
+    vec3 base = sampleVideo(vuv, (uBlurPx * uLens * edge) / uBoardScale, invScale);
+    vec3 soft = sampleVideo(vuv, BLOOM_PX / uBoardScale, invScale);
     color = base + max(soft - BLOOM_FLOOR, 0.0) * BLOOM;
   }
 
@@ -308,6 +325,13 @@ export type HeroState = {
   opacity: number;
   /** 素材虚焦（px）：从 BLUR 收到 0，素材是「先带糊压上来、再对焦」的 */
   blur: number;
+  /**
+   * 取景：0 = 画面贴屏幕（按 4:3 的屏幕 cover，16:9 的视频于是左右各裁一截），
+   * 1 = 铺满视口（按屏幕比例 cover，只裁比例差的那一点）。
+   * 中间值由着色器在两套取景之间插值，见 scene-canvas 的 framingUv。
+   * 由 hero-scene 的展开/收起动画写，静止时是 0。
+   */
+  framing: number;
 };
 
 /**
@@ -494,10 +518,6 @@ export function SceneCanvas({
       video: gl.getUniformLocation(scene, "uVideo"),
       res: gl.getUniformLocation(scene, "uRes"),
       buffer: gl.getUniformLocation(scene, "uBuffer"),
-      videoSize: gl.getUniformLocation(scene, "uVideoSize"),
-      photoOffset: gl.getUniformLocation(scene, "uPhotoOffset"),
-      zoom: gl.getUniformLocation(scene, "uZoom"),
-      pivot: gl.getUniformLocation(scene, "uPivot"),
       lens: gl.getUniformLocation(scene, "uLens"),
       blurPx: gl.getUniformLocation(scene, "uBlurPx"),
       asset: gl.getUniformLocation(scene, "uAsset"),
@@ -508,6 +528,9 @@ export function SceneCanvas({
       assetLod: gl.getUniformLocation(scene, "uAssetLod"),
       holePad: gl.getUniformLocation(scene, "uHolePad"),
       zoomAnchor: gl.getUniformLocation(scene, "uZoomAnchor"),
+      rectRest: gl.getUniformLocation(scene, "uRectRest"),
+      rectFull: gl.getUniformLocation(scene, "uRectFull"),
+      framing: gl.getUniformLocation(scene, "uFraming"),
     };
     const dustPosAttr = gl.getAttribLocation(dustProgram, "aPos");
     const dustSeedAttr = gl.getAttribLocation(dustProgram, "aSeed");
@@ -534,6 +557,16 @@ export function SceneCanvas({
     /** 素材与屏幕洞在版面里的矩形（px）：版面一变就重新量，见 lib/hero-screen.ts */
     const artRect = new Float32Array(4);
     const holeRect = new Float32Array(4);
+    // 画面两路取景的框与「视频那块矩形」（都是版面 px）：
+    //   frameRest / rectRest —— 贴屏幕：框就是屏幕洞，视频 cover 在 4:3 的屏幕里；
+    //   frameFull / rectFull —— 铺满：框是画布露在视口里的那一块，只按屏幕比例裁最少的一点。
+    // 每帧只改后者的框与前者的矩形（鼠标视差、定点缩放），不新建对象。
+    const frameRest: Rect = { x: 0, y: 0, w: 0, h: 0 };
+    const frameFull: Rect = { x: 0, y: 0, w: 0, h: 0 };
+    /** 画布露在视口里的那一块（画布 px）：每帧从容器框量，再喂给 visibleFrame */
+    const viewRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+    const rectRest = new Float32Array(4);
+    const rectFull = new Float32Array(4);
 
     // —— CSS 令牌
     const blurPx = cssNumber("--lens-blur", 9);
@@ -554,7 +587,8 @@ export function SceneCanvas({
     let zoomTo = baseZoom;
     let zoomStart = 0;
     let singleClickTimer: ReturnType<typeof setTimeout> | null = null;
-    let pivotX = 0;                  // 当前生效的支点
+    /** 点击定点缩放的支点：**版面 px**（着色器里那套 board 坐标），两路取景共用同一个支点 */
+    let pivotX = 0;
     let pivotY = 0;
     let pivotFromX = 0;              // 本次动画的支点起点/终点
     let pivotFromY = 0;
@@ -602,14 +636,19 @@ export function SceneCanvas({
       // 起手放大倍数：视差收幅度、以及几何那套的参考值（见 follow()）。版面变了就跟着变。
       growRef = geom.grow;
       holePad = geom.pad;
+      // 「贴屏幕」那一路的框 = 屏幕洞，整块版面不动它
+      frameRest.x = holeRect[0];
+      frameRest.y = holeRect[1];
+      frameRest.w = holeRect[2];
+      frameRest.h = holeRect[3];
       // 桌面绕屏幕中心（= 洞心，缩放不动的那个点），手机绕画布中心
       zoomAnchor[0] = anchorMode === "canvas" ? width / 2 : geom.hole.cx;
       zoomAnchor[1] = anchorMode === "canvas" ? height / 2 : geom.hole.cy;
-      // 点击定点缩放的起手支点 = 窗口中心。注意支点用的是着色器里那套坐标（窗口内的 px），
-      // 不是版面 px——版面里那一套大得多，直接塞进去支点会落在画面外面。
+      // 点击定点缩放的起手支点 = 屏幕中心（版面 px）。以后每帧算的「视频那块矩形」绕它缩放，
+      // 所以支点必须与 holeRect / zoomAnchor 同一套坐标，不能再是屏幕内的局部 px。
       if (!pivotX && !pivotY) {
-        pivotX = pivotFromX = pivotToX = geom.hole.w / 2;
-        pivotY = pivotFromY = pivotToY = geom.hole.h / 2;
+        pivotX = pivotFromX = pivotToX = geom.hole.cx;
+        pivotY = pivotFromY = pivotToY = geom.hole.cy;
       }
     };
 
@@ -655,11 +694,13 @@ export function SceneCanvas({
       if (goingIn) {
         const rect = host.getBoundingClientRect();
         const k = Math.max(state.scale, 1e-3);
-        pivotToX = zoomAnchor[0] + (clientX - rect.left - zoomAnchor[0]) / k - holeRect[0];
-        pivotToY = zoomAnchor[1] + (clientY - rect.top - zoomAnchor[1]) / k - holeRect[1];
+        // 点到的那个屏幕像素在版面里落在哪：与着色器里 board = anchor + (px - anchor)/k 同一套算法
+        pivotToX = zoomAnchor[0] + (clientX - rect.left - zoomAnchor[0]) / k;
+        pivotToY = zoomAnchor[1] + (clientY - rect.top - zoomAnchor[1]) / k;
       } else {
-        pivotToX = holeRect[2] / 2;
-        pivotToY = holeRect[3] / 2;
+        // 收回来时支点回到屏幕中心（= 起手那个支点）
+        pivotToX = holeRect[0] + holeRect[2] / 2;
+        pivotToY = holeRect[1] + holeRect[3] / 2;
       }
       lensTarget = goingIn ? 1 : 0;
     };
@@ -757,13 +798,17 @@ export function SceneCanvas({
         lightPosUv[i * 2 + 1] = LIGHTS[i].origin[1] + lightCurrent[i][1];
       }
 
-      // 滚动动画写的三个数（普通对象，GSAP 每帧改）。素材还没解码完就先当它没显形：
+      // 滚动动画写的几个数（普通对象，GSAP 每帧改）。素材还没解码完就先当它没显形：
       // 不全的黑图会糊住底下那块画面，等图到了再交给它。
       const boardScale = Math.max(state.scale, 1e-3);
       const assetAlpha = assetUp ? state.opacity : 0;
       const assetLod = Math.log2(1 + Math.max(0, state.blur));
       // 画面跟指针走的幅度：缩进屏幕里之后收一档（见 SHRUNK_FOLLOW），灯光的漂移不受影响
       const photoScale = follow();
+      // 视差按当前放大倍数退回版面坐标：photoCurrent 记的是「屏幕上该走多少像素」，
+      // 不除以 boardScale 的话，起手那种放大了五倍的状态下画面会被推得满屏乱跑。
+      const parallaxX = (photoCurrent[0] * photoScale) / boardScale;
+      const parallaxY = (photoCurrent[1] * photoScale) / boardScale;
 
       // 24fps 的视频配 60fps 的循环：同一帧不必反复上传（每帧一次 3.7MB 拷贝）
       const active = pickActive();
@@ -774,6 +819,34 @@ export function SceneCanvas({
         uploadedVideo = active;
         uploadedTime = active.currentTime;
       }
+
+      // —— 两路取景（都是版面 px），交给着色器按 state.framing 插值：
+      // 一路是屏幕洞（贴屏幕），一路是「画布露在视口里的那一块」（铺满，只按屏幕比例裁最少的一点）。
+      // 后者每帧都要量：画布露出来的那一段随滚动变，放大倍数也在动，两者都影响它在版面里的位置与大小。
+      viewRect.x = 0;
+      viewRect.y = Math.max(0, -rect.top);
+      viewRect.w = width;
+      viewRect.h = Math.max(1, Math.min(height, rect.top + window.innerHeight) - viewRect.y);
+      visibleFrame(frameFull, boardScale, zoomAnchor[0], zoomAnchor[1], viewRect);
+      // 视频解码前 videoWidth 还是 0，先用 16:9 顶着（与原来喂给 uVideoSize 的兜底一致）
+      const videoW = active?.videoWidth || 16;
+      const videoH = active?.videoHeight || 9;
+      videoRect(rectRest, frameRest, videoW, videoH, pivotX, pivotY, zoom, parallaxX, parallaxY);
+      // 「铺满」那一路把默认放大倍数归一掉：--scene-zoom（1.08）是给「画面缩在显示器里」垫的
+      // （免得贴着屏幕边壳露馅），满屏之后没边壳可露，再留着它就只是白裁掉 8%。
+      // 归一之后两路的点击推近倍数相对量一致（都是 zoom / baseZoom 倍），点一下看到的是同一个推近幅度。
+      // 视差按 FULL_PARALLAX 压低：这一路是紧贴的 cover，没有余量可推。
+      videoRect(
+        rectFull,
+        frameFull,
+        videoW,
+        videoH,
+        pivotX,
+        pivotY,
+        zoom / baseZoom,
+        parallaxX * FULL_PARALLAX,
+        parallaxY * FULL_PARALLAX,
+      );
 
       // 若素材是动态视频（如 WebM），也按帧更新纹理
       if (isVideoAsset && assetVideo && assetVideo.readyState >= 2 && assetVideo.currentTime !== assetUploadedTime) {
@@ -798,16 +871,6 @@ export function SceneCanvas({
       gl.bindTexture(gl.TEXTURE_2D, assetTexture);
       gl.uniform2f(sceneLoc.res, width, height);
       gl.uniform2f(sceneLoc.buffer, canvas.width, canvas.height);
-      gl.uniform2f(sceneLoc.videoSize, active?.videoWidth || 16, active?.videoHeight || 9);
-      // 视差也按当前放大倍数退回版面坐标：photoCurrent 记的是「屏幕上该走多少像素」，
-      // 不除以 boardScale 的话，起手那种放大了五倍的状态下画面会被推得满屏乱跑。
-      gl.uniform2f(
-        sceneLoc.photoOffset,
-        (photoCurrent[0] * photoScale) / boardScale,
-        (photoCurrent[1] * photoScale) / boardScale,
-      );
-      gl.uniform1f(sceneLoc.zoom, zoom);
-      gl.uniform2f(sceneLoc.pivot, pivotX, pivotY);
       gl.uniform1f(sceneLoc.lens, lens);
       gl.uniform1f(sceneLoc.blurPx, blurPx);
       gl.uniform4fv(sceneLoc.art, artRect);
@@ -817,6 +880,11 @@ export function SceneCanvas({
       gl.uniform1f(sceneLoc.assetLod, assetLod);
       gl.uniform1f(sceneLoc.holePad, holePad);
       gl.uniform2fv(sceneLoc.zoomAnchor, zoomAnchor);
+      gl.uniform4fv(sceneLoc.rectRest, rectRest);
+      gl.uniform4fv(sceneLoc.rectFull, rectFull);
+      // 取景在「贴屏幕」与「铺满视口」之间插值：0/1 两端各是一套完整取景（含视差与定点缩放），
+      // 中间是取景框在插值，见着色器的 framingUv。夹一下，防 GSAP 那边写进来个超出范围的数。
+      gl.uniform1f(sceneLoc.framing, Math.min(1, Math.max(0, state.framing)));
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
       // —— 灰尘粒子：只在光里亮，加法混合叠上去
