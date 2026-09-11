@@ -11,18 +11,18 @@ export default function Home() {
       {/* 首屏：一整屏的场景。滚动时它跟在滚轮后面慢慢往下走，同时缩进 PC 素材的屏幕里（见 hero-scene.tsx） */}
       <HeroScene />
       {/*
-        内页：一整屏的纸（#D2BA95）。
-        · 带花的素材钉在纸的顶部（sticky），首屏从下面追上来，被这张纸一点点盖掉；
-        · 素材上半是透明的（花就立在这一带）——那是还没被纸盖住的那块，透出来的正是首屏；
-        · 纸身是接着素材下缘铺的一块纯色，颜色与素材实测同色（#D1B995，取 #D2BA95），接缝看不出来。
+        内页：一整屏的墙（#D4B792）。
+        · 墙面素材钉在顶部（sticky），首屏从下面追上来，被这面墙一点点盖掉；
+        · 素材最上方约 70px（占素材高 9.7%）是透明的，就是墙沿那条缝，透出来的正是还没被盖住的首屏；
+        · 墙身是接着素材下缘铺的一块纯色，颜色与素材实测同色（#D4B792），接缝看不出来。
       */}
       <section className="-mt-(--paper-overhang) relative z-10 flex min-h-screen flex-col">
         <img
-          src="/flowers_cutout.webp"
+          src="/wall_cutout.webp"
           alt=""
           aria-hidden
-          width={1584}
-          height={583}
+          width={3168}
+          height={723}
           className="sticky top-0 z-10 block w-full"
         />
         {/* 纸身：接着素材下缘铺。往上压 2px 塞到素材底下——两条盒子的公共边落在小数像素上时，
