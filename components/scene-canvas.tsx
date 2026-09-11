@@ -383,33 +383,58 @@ export function SceneCanvas({
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
-    // 素材：屏幕那块洞是全透明的，洞里由着色器自己画画面（见 FRAG）。带 mipmap 是因为
-    // 「显形虚焦」直接挑一层 mip 就够——比每帧多做几趟模糊采样便宜得多，糊得也干净。
+    // 素材：支持静态图片或带 alpha 通道的动态视频（如 .webm）。
+    // 屏幕那块洞是全透明的，洞里由着色器自己画画面（见 FRAG）。
     const assetTexture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, assetTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     let assetUp = false;
-    const assetImage = new Image();
-    assetImage.decoding = "async";
-    assetImage.onload = () => {
-      gl.bindTexture(gl.TEXTURE_2D, assetTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, assetImage);
-      gl.generateMipmap(gl.TEXTURE_2D);
-      // 换素材（重新导出）时比例会对不上：几何是照 ART_RATIO 算的，对不上整套就错位。
-      // 不拦着，只报一声——要改的是 lib/hero-screen.ts 里的常量与尺寸量法。
-      const ratio = assetImage.naturalWidth / assetImage.naturalHeight;
-      if (Math.abs(ratio - ART_RATIO) > 0.01) {
-        console.warn(
-          `[scene-canvas] ${asset} 的宽高比 ${ratio.toFixed(4)} 与 ART_RATIO ${ART_RATIO.toFixed(4)} 不一致，几何要重新对一遍（lib/hero-screen.ts）`,
-        );
-      }
-      assetUp = true;
-    };
-    assetImage.src = asset;
+    let assetUploadedTime = -1;
+    const isVideoAsset = /\.(webm|mp4|mov|ogg)(\?.*)?$/i.test(asset);
+    let assetVideo: HTMLVideoElement | null = null;
+    let assetImage: HTMLImageElement | null = null;
 
+    if (isVideoAsset) {
+      assetVideo = document.createElement("video");
+      assetVideo.src = asset;
+      assetVideo.muted = true;
+      assetVideo.loop = true;
+      assetVideo.playsInline = true;
+      assetVideo.autoplay = true;
+      assetVideo.preload = "auto";
+      assetVideo.onloadedmetadata = () => {
+        const ratio = assetVideo!.videoWidth / assetVideo!.videoHeight;
+        if (Math.abs(ratio - ART_RATIO) > 0.01) {
+          console.warn(
+            `[scene-canvas] ${asset} 的宽高比 ${ratio.toFixed(4)} 与 ART_RATIO ${ART_RATIO.toFixed(4)} 不一致，几何要重新对一遍（lib/hero-screen.ts）`,
+          );
+        }
+      };
+      assetVideo.oncanplay = () => {
+        assetUp = true;
+      };
+      assetVideo.play().catch(() => {});
+    } else {
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      assetImage = new Image();
+      assetImage.decoding = "async";
+      assetImage.onload = () => {
+        gl.bindTexture(gl.TEXTURE_2D, assetTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, assetImage!);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        const ratio = assetImage!.naturalWidth / assetImage!.naturalHeight;
+        if (Math.abs(ratio - ART_RATIO) > 0.01) {
+          console.warn(
+            `[scene-canvas] ${asset} 的宽高比 ${ratio.toFixed(4)} 与 ART_RATIO ${ART_RATIO.toFixed(4)} 不一致，几何要重新对一遍（lib/hero-screen.ts）`,
+          );
+        }
+        assetUp = true;
+      };
+      assetImage.src = asset;
+    }
     // —— 着色器里的固定表
     // 位置只查一次：每帧再 getUniformLocation/getAttribLocation 都是同步 GL 调用，白花时间
     const sceneLoc = {
@@ -649,6 +674,14 @@ export function SceneCanvas({
         uploadedTime = video.currentTime;
       }
 
+      // 若素材是动态视频（如 WebM），也按帧更新纹理
+      if (isVideoAsset && assetVideo && assetVideo.readyState >= 2 && assetVideo.currentTime !== assetUploadedTime) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, assetTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, assetVideo);
+        assetUploadedTime = assetVideo.currentTime;
+      }
+
       // —— 场景
       gl.useProgram(scene);
       gl.viewport(0, 0, canvas.width, canvas.height);
@@ -742,13 +775,17 @@ export function SceneCanvas({
       resizeObserver.disconnect();
       host.removeEventListener("click", onClick);
       host.removeEventListener("pointermove", onPointerMove);
+      if (assetVideo) {
+        assetVideo.pause();
+        assetVideo.src = "";
+        assetVideo.load();
+      }
       gl.deleteTexture(texture);
       gl.deleteTexture(assetTexture);
       gl.deleteBuffer(quad);
       gl.deleteBuffer(dustPosBuffer);
       gl.deleteBuffer(dustSeedBuffer);
       gl.deleteProgram(scene);
-      gl.deleteProgram(dustProgram);
     };
   }, [src, asset, anchorMode, state]);
 

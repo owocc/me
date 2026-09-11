@@ -33,7 +33,7 @@ export default function Home() {
       </section>
       {SHOW_NEWSPAPER && <Newspaper />}
       {/* 进场：字从中间放大到溢出整屏，洞里透出画面，随后底色淡出 */}
-      <LoadingVeil preload={["/bg-v1.webp", "/pc_cutout.webp"]} />
+      <LoadingVeil preload={["/bg-v1.webp", "/fly-pc_alpha.webm"]} />
     </main>
   );
 }

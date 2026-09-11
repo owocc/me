@@ -159,7 +159,7 @@ export function HeroScene() {
         <SceneCanvas
           src="/bg-loop.mp4"
           poster="/bg-v1.webp"
-          asset="/pc_cutout.webp"
+          asset="/fly-pc_alpha.webm"
           zoomAnchor={mobile ? "canvas" : "screen"}
           state={state}
         />
