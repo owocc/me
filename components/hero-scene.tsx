@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 
@@ -18,6 +18,22 @@ const BLUR = 24;
 /** 透明度只撑开头这么远（px）：滚过它素材就已经是 100% 不透明 */
 const REVEAL_PX = 50;
 
+/** 手机那一档（与 Tailwind 的 md 同界）：这一档不做「缩进屏幕」那套。 */
+const MOBILE = "(max-width: 767px)";
+
+/** 手机：起手就显示器和画面一起在，不缩放、不钉住，滚轮直接往下走。 */
+function useIsMobile() {
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE);
+    const sync = () => setMobile(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+  return mobile;
+}
+
 /**
  * 首屏：一整屏（100vh × 满宽）的场景，作为页面的第一个板块，不铺到整页。
  *
@@ -33,10 +49,14 @@ const REVEAL_PX = 50;
  *
  * 动画只改一个普通对象（state）：GSAP 直接改它的字段，SceneCanvas 每帧读，
  * 不过 React state——省掉每帧一次重渲染。
+ *
+ * 手机那一档（{@link MOBILE}）另走一条路：不缩放、不钉住，起手就把显示器与画面一起摆好
+ * （state 直接落在终态），滚轮直接往下走。桌面端才做「显示器从画外化出来」那一套。
  */
 export function HeroScene() {
   const screenRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  const mobile = useIsMobile();
   // 初值 = 首帧：素材放到最大（洞盖满整屏）、还藏着、还糊着
   const state = useRef<HeroState>({ scale: 1, opacity: 0, blur: BLUR }).current;
 
@@ -48,7 +68,16 @@ export function HeroScene() {
     // 幅度和滚动区间都取版面高度（占位层 = 100vh），不取 window.innerHeight：
     // 手机上滚起来地址栏会收，innerHeight 会跳一次，幅度跟着跳就露馅了。
     const span = () => screen.offsetHeight;
-    const grow = () => heroGeometry(box.offsetWidth, box.offsetHeight).grow;
+    const grow = () => heroGeometry(box.offsetWidth, box.offsetHeight, !mobile).grow;
+
+    // 手机：显示器与画面一起显示，不缩放也不钉住页面——首屏就是终态，滚轮直接往下走。
+    // 只在 mount 时写一次（state 是普通对象，不触发重渲染），之后没有东西再改它。
+    if (mobile) {
+      state.scale = 1;
+      state.opacity = 1;
+      state.blur = 0;
+      return;
+    }
 
     // 减少动态效果时不跟滚轮较劲：直接落在终态（素材原大小、不透明、清晰），也不钉住页面。
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -116,7 +145,7 @@ export function HeroScene() {
       tween.scrollTrigger?.kill();
       tween.kill();
     };
-  }, [state]);
+  }, [state, mobile]);
 
   return (
     <div ref={screenRef} aria-hidden className="hero-scene">
@@ -125,6 +154,7 @@ export function HeroScene() {
           src="/bg-loop.mp4"
           poster="/bg-v1.webp"
           asset="/pc_cutout.webp"
+          contain={!mobile}
           state={state}
         />
       </div>

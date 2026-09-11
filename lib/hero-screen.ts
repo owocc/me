@@ -18,11 +18,14 @@ export const GLASS = { x: 927 / 2200, y: 397 / 1228, w: 371 / 2200, h: 269 / 122
 /** 屏幕的比例：老显示器是 4:3 的，写死——不跟素材量出来的包围盒走（那个被斜角撑宽了）。 */
 export const SCREEN_ASPECT = 4 / 3;
 
+/**
+ * 片子的比例。屏幕里按 contain 摆（整幅画面都要看得见，宁可上下留黑边也不裁），
+ * 所以起手倍数要照它算。换片子（不是 16:9 了）就跟着改——实际视频对不上时 scene-canvas 会告警。
+ */
+export const VIDEO_ASPECT = 16 / 9;
+
 /** 素材固有宽高比（2200×1228 的导出）。换图就跟着改——两处不一致时 scene-canvas 会告警。 */
 export const ART_RATIO = 2200 / 1228;
-
-/** 起手放大到「窗口盖满整个版面」之后再留的一点余量：首屏一点边壳都不露。 */
-const GROW_FILL = 1.02;
 
 export type HeroGeometry = {
   /** 素材内容按 cover 铺满版面时，内容在版面里的位置与大小（px） */
@@ -34,12 +37,12 @@ export type HeroGeometry = {
    * 玻璃边沿上。着色器靠它把画面往外多画一圈，不然那圈会透出台面底色。
    */
   pad: number;
-  /** 起手放大倍数：放大到窗口把整个版面（含首屏下面那截留白）都盖住 */
+  /** 起手放大倍数：放大到「整幅视频正好落在版面里」（上下留黑边） */
   grow: number;
 };
 
 /** 版面尺寸（= 画布尺寸 = 一屏 + 底下的撕口余量）→ 素材与窗口的几何 */
-export function heroGeometry(boxW: number, boxH: number): HeroGeometry {
+export function heroGeometry(boxW: number, boxH: number, contain = true): HeroGeometry {
   // cover：版面比素材更宽时按宽铺满，否则按高铺满——和 object-fit: cover 一个算法
   const artH = boxW / boxH > ART_RATIO ? boxW / ART_RATIO : boxH;
   const artW = artH * ART_RATIO;
@@ -60,12 +63,13 @@ export function heroGeometry(boxW: number, boxH: number): HeroGeometry {
   // 窗口四边到玻璃包围盒的空档（取大的那边），着色器拿它当「画面往外多画一圈」的宽度
   const pad = Math.max((glassW - holeW) / 2, (glassH - holeH) / 2);
 
-  // 窗口心不在版面正中（屏幕偏上，离下沿最远），所以四个方向分开量、取最远的那个边：
-  // 照它放大，窗口就把整个版面都罩住了。
-  const grow =
-    Math.max(
-      (2 * Math.max(hole.cx, boxW - hole.cx)) / hole.w,
-      (2 * Math.max(hole.cy, boxH - hole.cy)) / hole.h,
-    ) * GROW_FILL;
+  // 起手倍数：让整幅视频刚好落进版面。窗口是 4:3、片子是 16:9，所以按 contain 摆时占满窗口的宽，
+  // 视频的高 = 窗口宽 ÷ 片子比例。窗口心不在版面正中（屏幕偏右偏上），四条边得各留各的——
+  // 按「最窄的那一边」定尺寸，视频才一点不裁。
+  const halfW = Math.min(hole.cx, boxW - hole.cx);
+  const halfH = Math.min(hole.cy, boxH - hole.cy);
+  const shownH = hole.w / VIDEO_ASPECT;
+  // 手机那条路不做缩放（起手就是显示器 + 画面一起在），这里给 1 就行。
+  const grow = contain ? Math.min((2 * halfW) / hole.w, (2 * halfH) / shownH) : 1;
   return { art, hole, pad, grow };
 }
