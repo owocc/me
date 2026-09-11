@@ -126,8 +126,6 @@
   --lens-out: 600ms;
   /* 四周失焦的模糊半径（越小越轻）。 */
   --lens-blur: 9px;
-  /* 镜片边缘的折射高光颜色（着色器里按半径叠上去）。 */
-  --refraction-color: oklch(0.99 0.02 80 / 26%);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);

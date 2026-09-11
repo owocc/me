@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 
 /**
- * 背景场景（WebGL2 一块画布）：视频铺满 + 三层光 + 点击定点缩放 + 镜头畸变/失焦/折射 + 灰尘粒子。
+ * 背景场景（WebGL2 一块画布）：视频铺满 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子。
  *
  * 为什么从 DOM 换成画布：原先畸变走 SVG feDisplacementMap、四周失焦走 backdrop-filter，
  * 画面里只要有 <video>，这两层滤镜就得逐帧把视频喂进滤镜管线——实测放大态 50ms/帧（约 20fps）。
@@ -52,7 +52,6 @@ uniform vec3 uLightColor[3];
 uniform vec2 uLightPos[3];   // uv
 uniform vec2 uLightSize[3];  // uv 半轴
 uniform float uLightAmp[3];
-uniform vec3 uRefraction;
 
 out vec4 outColor;
 
@@ -98,10 +97,6 @@ void main() {
     float alpha = clamp(1.0 - length(d) / 0.72, 0.0, 1.0);
     color = 1.0 - (1.0 - color) * (1.0 - uLightColor[i] * alpha * uLightAmp[i]);
   }
-
-  // 镜片边缘的折射高光
-  float ring = smoothstep(0.8, 0.96, radius) * (1.0 - smoothstep(0.96, 1.0, radius));
-  color += uRefraction * ring * uLens;
 
   outColor = vec4(color, 1.0);
 }`;
@@ -270,7 +265,6 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
     const lightAmps = new Float32Array(LIGHTS.map((l) => Number(l.color.match(/\/\s*([\d.]+)%/)?.[1] ?? 30) / 100));
     const lightSizes = new Float32Array(LIGHTS.flatMap((l) => [...l.size]));
     const lightPosUv = new Float32Array(6);
-    const refraction = toRgb(getComputedStyle(document.documentElement).getPropertyValue("--refraction-color").trim() || "oklch(0.99 0.02 80 / 26%)");
 
     // —— CSS 令牌
     const blurPx = cssNumber("--lens-blur", 9);
@@ -403,7 +397,6 @@ export function BackgroundCanvas({ src, poster }: { src: string; poster: string 
       gl.uniform2fv(lightPos, lightPosUv);
       gl.uniform2fv(lightSize, lightSizes);
       gl.uniform1fv(lightAmp, lightAmps);
-      gl.uniform3f(gl.getUniformLocation(scene, "uRefraction"), refraction[0], refraction[1], refraction[2]);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
       // —— 灰尘粒子：只在光里亮，加法混合叠上去
