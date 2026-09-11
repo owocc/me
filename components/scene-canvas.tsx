@@ -25,6 +25,7 @@ import { ART_RATIO, heroGeometry } from "@/lib/hero-screen";
  *   · 画布就是整个首屏版面（一屏 + 底下的 --hero-bleed）：素材按 cover 铺满，屏幕窗口的位置
  *     与大小照 lib/hero-screen.ts 里量好的比例算，两边共用同一份几何；
  *   · 视频只是纹理来源：元素铺在画布下面（保持可见→浏览器不会掐掉解码，被画布盖住→看不见）；
+ *     **画面是一组视频**（videos 数组 + activeVideo 下标），当前这一段进纹理，别的只解码不上传；
  *   · 灰尘粒子在片段着色器里按素材的 alpha 与画面的范围掐两道：屏幕边壳、草地、以及留边都不落灰；
  *   · 画布拿不到 WebGL2 时它自己隐藏，底下那段视频就是兜底背景；
  *   · 容器整块滚出视野就停画（视频也一起暂停），看不见的场景不该一直烧 CPU。
@@ -309,35 +310,89 @@ export type HeroState = {
   blur: number;
 };
 
+/**
+ * 一段画面。数组里放几段，屏幕上就换几段——只有 activeVideo 那一段会被采进纹理，
+ * 其余的先解码备着（换段时不至于从零开始缓冲）。
+ */
+export type VideoSource = {
+  /** 视频本体 */
+  src: string;
+  /** 这一段的视频首帧，解码前先顶上（也参与无 WebGL 时的兜底背景） */
+  poster: string;
+};
+
 export function SceneCanvas({
-  src,
-  poster,
+  videos,
   asset,
   zoomAnchor: anchorMode,
+  activeVideo = 0,
   state,
 }: {
-  /** 视频（画面本体） */
-  src: string;
-  /** 视频首帧，解码前先顶上 */
-  poster: string;
+  /**
+   * 画面（视频）列表：结构就是数组，一段也照样放进数组里。
+   * 以后加「多视频切换」只要往这里加项、改 activeVideo，着色器与几何都不用动。
+   */
+  videos: readonly VideoSource[];
   /** PC 素材（显示器 + 草地），屏幕那块洞是全透明的 */
   asset: string;
   /**
    * 缩放支点：`screen` = 绕屏幕（素材里那块玻璃）中心，`canvas` = 绕画布中心。
    */
   zoomAnchor: "screen" | "canvas";
+  /**
+   * 当前在屏幕上播放的是 videos 里的第几段（硬切：换下标即换画面，不做交叉淡入）。
+   * 越界会被夹回数组内；由外部 state/ref 驱动就不会触发 React 重渲染。
+   */
+  activeVideo?: number;
   /** 滚动/缩放状态，每帧读 */
   state: HeroState;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  /** 屏幕上的每一段视频各一个元素，下标与 videos 一一对应 */
+  const videoRefs = useRef<(HTMLVideoElement | null)[]>([]);
+  /** 当前在播第几段：渲染循环每帧读它，所以不走 React state */
+  const activeRef = useRef(activeVideo);
+  /** 容器露没露在视口里：render 里写，播放同步逻辑读（两边都不新建对象） */
+  const awakeRef = useRef(true);
+
+  /**
+   * 数组里只有「当前那段」在播，别的先解码备着但不占纹理、也不出声：
+   * 切换 = 换 activeRef.current，画面下一帧就换过来（纹理上传看它选元素）。
+   * 整个场景滚出视野时 awake 关掉，这里也是唯一一处按住所有视频的地方。
+   * 换段 effect 与渲染循环共用它，播放/暂停只有这一套判据。
+   */
+  const syncVideos = () => {
+    const current = videoRefs.current[activeRef.current];
+    videoRefs.current.forEach((element) => {
+      if (!element) return;
+      const wanted = awakeRef.current && element === current;
+      if (wanted) void element.play().catch(() => {});
+      else if (!element.paused) element.pause();
+    });
+  };
+
+  // —— 换段：activeVideo 变了才走一次这个 effect；渲染循环那边因此不用每帧比对「谁在播」——
+  // 数组里的段数只在「加段」时变，此时元素刚挂上，这里正好把起手该播的那段点起来。
+  useEffect(() => {
+    // 越界（数组变短、外部传了个错的）就夹回最后一格：宁可停在某一段上，也别让画面空掉
+    const last = Math.max(0, videos.length - 1);
+    activeRef.current = Math.min(Math.max(activeVideo, 0), last);
+    syncVideos();
+    // syncVideos 只读 ref，不需要进依赖；这里要的就是「换段了」与「段数变了」两个时机
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeVideo, videos]);
 
   useEffect(() => {
     const host = hostRef.current;
     const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!host || !canvas || !video) return;
+    if (!host || !canvas) return;
+
+    /** 当前这一段（还没解码好就返回 null，画面先留上一帧的内容） */
+    const pickActive = () => {
+      const element = videoRefs.current[activeRef.current];
+      return element && element.readyState >= 2 ? element : null;
+    };
 
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "high-performance" });
     const scene = gl ? link(gl, VERT, FRAG) : null;
@@ -508,6 +563,8 @@ export function SceneCanvas({
     let lens = 0;
     let lensTarget = 0;
     let uploadedTime = -1;
+    /** 上一次传进纹理的是哪个 video 元素：换段时它变了，同一帧的 currentTime 也得重传一次 */
+    let uploadedVideo: HTMLVideoElement | null = null;
     /** 画面当前该不该是活的（容器有没有露在视口里）；autoplay 已经让视频跑起来了，所以初值是 true */
     let awake = true;
     /** 素材起手放大到多少倍（在 resize() 里按版面量）：视差收幅度按「缩到多小」线性插 */
@@ -637,8 +694,8 @@ export function SceneCanvas({
       const onScreen = rect.bottom > 0 && rect.top < window.innerHeight;
       if (onScreen !== awake) {
         awake = onScreen;
-        if (awake) void video.play().catch(() => {});
-        else video.pause();
+        awakeRef.current = awake;
+        syncVideos();
       }
       if (!awake) {
         last = now; // 回来时 dt 不跳
@@ -684,11 +741,13 @@ export function SceneCanvas({
       const photoScale = follow();
 
       // 24fps 的视频配 60fps 的循环：同一帧不必反复上传（每帧一次 3.7MB 拷贝）
-      if (video.readyState >= 2 && video.currentTime !== uploadedTime) {
+      const active = pickActive();
+      if (active && (active !== uploadedVideo || active.currentTime !== uploadedTime)) {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-        uploadedTime = video.currentTime;
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, active);
+        uploadedVideo = active;
+        uploadedTime = active.currentTime;
       }
 
       // 若素材是动态视频（如 WebM），也按帧更新纹理
@@ -714,7 +773,7 @@ export function SceneCanvas({
       gl.bindTexture(gl.TEXTURE_2D, assetTexture);
       gl.uniform2f(sceneLoc.res, width, height);
       gl.uniform2f(sceneLoc.buffer, canvas.width, canvas.height);
-      gl.uniform2f(sceneLoc.videoSize, video.videoWidth || 16, video.videoHeight || 9);
+      gl.uniform2f(sceneLoc.videoSize, active?.videoWidth || 16, active?.videoHeight || 9);
       // 视差也按当前放大倍数退回版面坐标：photoCurrent 记的是「屏幕上该走多少像素」，
       // 不除以 boardScale 的话，起手那种放大了五倍的状态下画面会被推得满屏乱跑。
       gl.uniform2f(
@@ -794,6 +853,13 @@ export function SceneCanvas({
       host.removeEventListener("dblclick", onDblClick);
       if (singleClickTimer) clearTimeout(singleClickTimer);
       host.removeEventListener("pointermove", onPointerMove);
+      // 数组里每一段都停在原地，元素本身随 React 卸载
+      for (const element of videoRefs.current) {
+        if (!element) continue;
+        element.pause();
+        element.removeAttribute("src");
+        element.load();
+      }
       if (assetVideo) {
         assetVideo.pause();
         assetVideo.src = "";
@@ -806,23 +872,31 @@ export function SceneCanvas({
       gl.deleteBuffer(dustSeedBuffer);
       gl.deleteProgram(scene);
     };
-  }, [src, asset, anchorMode, state]);
+  }, [videos, asset, anchorMode, state]);
 
   return (
     <div ref={hostRef} className="absolute inset-0">
-      {/* 视频铺在画布下面：保持可见→浏览器不掐解码，被画布盖住→看不见；也当无 WebGL 时的兜底 */}
-      <video
-        ref={videoRef}
-        className="absolute inset-0 size-full object-cover"
-        src={src}
-        poster={poster}
-        autoPlay
-        muted
-        loop
-        playsInline
-        preload="auto"
-        aria-hidden
-      />
+      {/* 视频段铺在画布下面：保持可见→浏览器不掐解码，被画布盖住→看不见；也当无 WebGL 时的兜底。
+          数组里有几段就摆几个元素，只有当前这段不透明（.hero-video[data-active] 在 globals.css 里），
+          换段于是是硬切；preload 分两档——非当前段只拉到能解码，换段时不至于从零开始缓冲。 */}
+      {videos.map((video, index) => (
+        <video
+          key={video.src}
+          ref={(element) => {
+            videoRefs.current[index] = element;
+          }}
+          className="hero-video absolute inset-0 size-full object-cover"
+          data-active={index === activeVideo}
+          src={video.src}
+          poster={video.poster}
+          autoPlay={index === activeVideo}
+          muted
+          loop
+          playsInline
+          preload={index === activeVideo ? "auto" : "metadata"}
+          aria-hidden
+        />
+      ))}
       <canvas ref={canvasRef} className="absolute inset-0 size-full" aria-hidden />
     </div>
   );

@@ -6,6 +6,7 @@ import { ScrollTrigger } from "gsap/ScrollTrigger";
 
 import { SceneCanvas, type HeroState } from "@/components/scene-canvas";
 import { heroGeometry } from "@/lib/hero-screen";
+import { ACTIVE_HERO_VIDEO, HERO_PC_ASSET, HERO_VIDEOS } from "@/lib/hero-media";
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -58,6 +59,10 @@ function useIsMobile() {
  *
  * 手机那一档（{@link MOBILE}）另走一条路：不缩放、不钉住，起手就把显示器与画面一起摆好
  * （state 直接落在终态），滚轮直接往下走。桌面端才做「显示器从画外化出来」那一套。
+ *
+ * 屏幕里的画面现在是**数组**：段与顺序都在 lib/hero-media.ts 里，往里加项、改
+ * ACTIVE_HERO_VIDEO（或把 activeVideo 接成状态）就能多段切换，着色器、几何、
+ * 双击全屏这套都不用动。
  */
 export function HeroScene() {
   const screenRef = useRef<HTMLDivElement>(null);
@@ -252,10 +257,10 @@ export function HeroScene() {
     <div ref={screenRef} aria-hidden className="hero-scene cursor-pointer select-none">
       <div ref={boxRef} className="hero-canvas">
         <SceneCanvas
-          src="/bg-loop.mp4"
-          poster="/bg-v1.webp"
-          asset="/fly-pc_alpha.webm"
+          videos={HERO_VIDEOS}
+          asset={HERO_PC_ASSET}
           zoomAnchor="screen"
+          activeVideo={ACTIVE_HERO_VIDEO}
           state={state}
         />
       </div>

@@ -265,6 +265,22 @@
     width: 100%;
     height: calc(100% + var(--hero-bleed));
   }
+
+  /*
+   * 首屏的每一段画面（<video>，数量跟着 SceneCanvas 收到的 videos 数组走，首屏那份在 lib/hero-media.ts）。
+   * 平时完全被画布盖着看不见，露出来的只有两种情况：画布拿不到 WebGL2（它是兜底背景），
+   * 以及换段那一瞬间。所以这里只管「哪一段是当前段」——不透明的才是，别的整段收掉，
+   * 于是换段是硬切，不会两段视频叠在一起；那 120ms 只是为了换段时 poster 顶上来不闪一下，
+   * 真要瞬时硬切把这行删掉即可（WebGL 那条路根本不经过这两个元素）。
+   */
+  .hero-video {
+    opacity: 0;
+    transition: opacity 120ms linear;
+  }
+
+  .hero-video[data-active="true"] {
+    opacity: 1;
+  }
 }
 
 @utility halftone {

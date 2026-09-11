@@ -1,6 +1,7 @@
 import { HeroScene } from "@/components/hero-scene";
 import { LoadingVeil } from "@/components/loading-veil";
 import { Newspaper } from "@/components/newspaper";
+import { HERO_PRELOAD } from "@/lib/hero-media";
 
 /** 报纸先收起来，等版面定稿再打开。 */
 const SHOW_NEWSPAPER = false;
@@ -32,8 +33,9 @@ export default function Home() {
         </div>
       </section>
       {SHOW_NEWSPAPER && <Newspaper />}
-      {/* 进场：字从中间放大到溢出整屏，洞里透出画面，随后底色淡出 */}
-      <LoadingVeil preload={["/bg-v1.webp", "/fly-pc_alpha.webm"]} />
+      {/* 进场：字从中间放大到溢出整屏，洞里透出画面，随后底色淡出。
+          要等的资源跟着首屏那份视频数组走（见 lib/hero-media.ts），加段不用在这里补一遍。 */}
+      <LoadingVeil preload={[...HERO_PRELOAD]} />
     </main>
   );
 }
