@@ -5,7 +5,7 @@ import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 
 import { SceneCanvas, type HeroState } from "@/components/scene-canvas";
-import { heroGeometry } from "@/lib/hero-screen";
+import { heroGeometry, hitsScreenHole } from "@/lib/hero-screen";
 import { ACTIVE_HERO_VIDEO, HERO_PC_ASSET, HERO_VIDEOS } from "@/lib/hero-media";
 
 gsap.registerPlugin(ScrollTrigger);
@@ -156,12 +156,40 @@ export function HeroScene() {
       });
     };
 
+    /**
+     * 这一下点没点在画面（屏幕）里：与 SceneCanvas 里单击推近用的是同一条判据
+     * （lib/hero-screen.ts 的 hitsScreenHole），几何也当场按同一份量。
+     *
+     * 监听仍然挂在整块首屏上（滚出视野就收不到事件），但「算不算点到视频」由它决定：
+     * 显示器边壳、草地、留边上双击不该把画面顶到满屏。放大到满屏那一档（scale = grow、
+     * 素材已淡出）时整块版面都在窗口里，于是画面上任意位置双击都能收回来。
+     */
+    const overScreen = (clientX: number, clientY: number) => {
+      const rect = box.getBoundingClientRect();
+      const geom = heroGeometry(box.offsetWidth, box.offsetHeight);
+      return hitsScreenHole(
+        { x: clientX - rect.left, y: clientY - rect.top },
+        {
+          hole: {
+            x: geom.hole.cx - geom.hole.w / 2,
+            y: geom.hole.cy - geom.hole.h / 2,
+            w: geom.hole.w,
+            h: geom.hole.h,
+          },
+          pad: geom.pad,
+          scale: Math.max(state.scale, 1e-3),
+          anchor: { x: geom.hole.cx, y: geom.hole.cy },
+        },
+      );
+    };
+
     // 双击处理：改为 dblclick 事件触发全屏放大/收起
     // 单击则保留由 SceneCanvas 内部处理视频画面微观推近
     const handleDblClick = (e: MouseEvent) => {
       const target = e.target as Element | null;
       if (target?.closest("a, button, input, textarea, select, [contenteditable]")) return;
       if (window.scrollY > 10) return;
+      if (!overScreen(e.clientX, e.clientY)) return;
       if (!isExpandedRef.current) {
         expandToFullscreen();
       } else {
@@ -173,6 +201,8 @@ export function HeroScene() {
     let lastTapTime = 0;
     const handleTouchEnd = (e: TouchEvent) => {
       if (window.scrollY > 10) return;
+      const touch = e.changedTouches[0];
+      if (touch && !overScreen(touch.clientX, touch.clientY)) return;
       const now = performance.now();
       if (now - lastTapTime < 300) {
         // 触发双击

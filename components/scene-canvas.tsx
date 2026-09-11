@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 
-import { ART_RATIO, heroGeometry } from "@/lib/hero-screen";
+import { ART_RATIO, heroGeometry, hitsScreenHole } from "@/lib/hero-screen";
 
 /**
  * 首屏场景（WebGL2 一块画布）：视频 + 三层光 + 点击定点缩放 + 镜头畸变/四周失焦 + 灰尘粒子，
@@ -624,6 +624,27 @@ export function SceneCanvas({
       return 1 - (1 - SHRUNK_FOLLOW) * shrunk;
     };
 
+    /**
+     * 这一下点没点在画面（屏幕）里。
+     *
+     * 监听还挂在容器上（滚出去就收不到事件），但「算不算点到视频」由这个判据决定：
+     * 容器比画面大得多，版面里除了屏幕那块，还有显示器边壳、草地和留边——那些地方点一下
+     * 不该把画面推近。用的是着色器同一套坐标：holeRect / zoomAnchor / holePad 都是 resize()
+     * 量好后喂给着色器的那几个数，state.scale 每帧被 GSAP 改，所以缩到哪一档都对得上。
+     */
+    const overScreen = (clientX: number, clientY: number) => {
+      const rect = host.getBoundingClientRect();
+      return hitsScreenHole(
+        { x: clientX - rect.left, y: clientY - rect.top },
+        {
+          hole: { x: holeRect[0], y: holeRect[1], w: holeRect[2], h: holeRect[3] },
+          pad: holePad,
+          scale: Math.max(state.scale, 1e-3),
+          anchor: { x: zoomAnchor[0], y: zoomAnchor[1] },
+        },
+      );
+    };
+
     const doClickZoom = (clientX: number, clientY: number) => {
       const goingIn = zoomTo <= baseZoom + 1e-3;
       zoomFrom = zoom;
@@ -654,6 +675,10 @@ export function SceneCanvas({
         }
         return;
       }
+      // 点在画面外（显示器边壳、草地、留边）就当没点过：不排这个单击，也就不会推近。
+      // 推近是在画面窗口「里面」改采样，窗口本身不动，所以放大态下这一片还是同一个判据——
+      // 点画面推进去、再点画面收回来，都不会因为点了画面外而误触发。
+      if (!overScreen(event.clientX, event.clientY)) return;
       if (singleClickTimer) clearTimeout(singleClickTimer);
       const cx = event.clientX;
       const cy = event.clientY;

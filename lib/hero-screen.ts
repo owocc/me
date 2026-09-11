@@ -62,3 +62,33 @@ export function heroGeometry(boxW: number, boxH: number): HeroGeometry {
   );
   return { art, hole, pad, grow };
 }
+
+/**
+ * 点（版面 px）落没落在「画面（视频）窗口」里。
+ *
+ * 判据与 scene-canvas.tsx 着色器里那段 insideHole 同一套：先把点绕缩放支点反解回「还没放大」
+ * 的版面坐标（scale 就是着色器里的 uBoardScale），再看它落不落在屏幕洞的矩形里——洞外那圈
+ * pad 也算（着色器同样往外多画一圈，不然玻璃边沿会透出台面底色）。
+ *
+ * 点击放大只认画面这一块：版面里别的部分（显示器边壳、草地、留边）点下去不算点在视频上。
+ * 放大到满屏那一档（scale = grow、素材已淡出）时，整块版面都落在窗口里，于是又能点哪儿都算。
+ */
+export function hitsScreenHole(
+  point: { x: number; y: number },
+  view: {
+    /** 屏幕洞在版面里的矩形（px），x/y 是左上角 */
+    hole: { x: number; y: number; w: number; h: number };
+    /** 洞外仍算画面的那一圈（px），见 HeroGeometry.pad */
+    pad: number;
+    /** 版面当前的放大倍数（着色器里的 uBoardScale） */
+    scale: number;
+    /** 缩放支点（版面 px）：与着色器里的 uZoomAnchor 同一个——桌面是洞心，手机是画布中心 */
+    anchor: { x: number; y: number };
+  },
+): boolean {
+  const scale = Math.max(view.scale, 1e-3);
+  const bx = view.anchor.x + (point.x - view.anchor.x) / scale;
+  const by = view.anchor.y + (point.y - view.anchor.y) / scale;
+  const { hole, pad } = view;
+  return bx >= hole.x - pad && bx <= hole.x + hole.w + pad && by >= hole.y - pad && by <= hole.y + hole.h + pad;
+}
