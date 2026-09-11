@@ -341,8 +341,8 @@ export type HeroState = {
 export type VideoSource = {
   /** 视频本体 */
   src: string;
-  /** 这一段的视频首帧，解码前先顶上（也参与无 WebGL 时的兜底背景） */
-  poster: string;
+  /** 可选：这一段的视频首帧，解码前先顶上。不传就不下这张图（画布底下本来就是空的）。 */
+  poster?: string;
 };
 
 export function SceneCanvas({
