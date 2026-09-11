@@ -13,14 +13,16 @@ import { useEffect, useRef } from "react";
  * 分工：
  *   · 视差、缩放缓动、镜头淡入淡出、粒子漂移都在这里的 rAF 里算；
  *   · 滚动模糊（画面从屏幕底部往上糊、随滚动加深）在片段着色器里算，见 FRAG 里的 uSweep；
- *   · 尺寸只认自己那个容器的框（首屏里那层会动的画布，见 hero-scene.tsx）：容器是一屏加底下一截余量，
- *     不铺到整页；指针/点击也只认容器内的坐标，滚到下面的板块上时画面不再跟着动；
+ *   · 尺寸只认自己那个容器的框（首屏里那层会动的画面，见 hero-scene.tsx）：容器是一块 16:9
+ *     （宽度按「盖住版面」算，满屏时比视口大，缩进显示器时正好盖住屏幕那块洞），不铺到整页；
+ *     光/粒子/镜头这些按版面调的参数在 resize() 里换算进画布坐标，露在视口里的那部分才不走样；
+ *     指针/点击也只认容器内的坐标，滚到下面的板块上时画面不再跟着动；
  *   · 视频只是纹理来源：元素铺在画布下面（保持可见→浏览器不会掐掉解码，被画布盖住→看不见）；
  *   · 画布拿不到 WebGL2 时它自己隐藏，底下那段视频就是兜底背景；
  *   · 容器整块滚出视野就停画（视频也一起暂停），看不见的场景不该一直烧 CPU。
  */
 
-/** 三层光。origin/size/range 都是视口比例，和原来 CSS 里的写法一一对应。 */
+/** 三层光。origin/size/range 都是版面（首屏那一屏）比例，和原来 CSS 里的写法一一对应。 */
 const LIGHTS = [
   { color: "oklch(0.9 0.16 62 / 34%)", origin: [0.02, -0.1], size: [0.78, 0.7], range: [9, 7], ease: 0.055 },
   { color: "oklch(0.86 0.19 28 / 32%)", origin: [0.12, -0.04], size: [0.6, 0.56], range: [16, 12], ease: 0.09 },
@@ -58,9 +60,10 @@ uniform float uEdgePx;       // 纸的上沿在屏幕上的 y（px，0 = 屏幕�
 uniform float uViewTop;      // 画面层顶边在视口里的 y（px）
 uniform float uViewH;        // 视口高（px）
 uniform vec3 uLightColor[3];
-uniform vec2 uLightPos[3];   // uv
+uniform vec2 uLightPos[3];   // uv（画布）
 uniform vec2 uLightSize[3];  // uv 半轴
 uniform float uLightAmp[3];
+uniform vec2 uBoxScale;      // 版面（首屏那一屏）占画布的比例：画布是整块 16:9，比版面宽出来的部分不在视口里
 
 // 滚动模糊：一条贴着纸上沿往上铺的模糊带——越靠近纸越糊，往上渐清晰，整条随滚动加深。
 // 之所以贴着纸的上沿而不是屏幕底：纸盖上来以后屏幕底下那半截早被纸挡住了，
@@ -98,8 +101,12 @@ void main() {
   vec2 screenUv = vec2(gl_FragCoord.x / uBuffer.x, 1.0 - gl_FragCoord.y / uBuffer.y);
 
   // 镜头：越靠边越往画面中心取采样（等于把四周向外拉伸），并叠加失焦
-  vec2 centered = (screenUv - 0.5) * vec2(uRes.x / uRes.y, 1.0);
-  float radius = clamp(length(centered) / (0.5 * length(vec2(uRes.x / uRes.y, 1.0))), 0.0, 1.0);
+  // 半径按「版面」归一（uBoxScale 把画布坐标换回版面坐标）：画布比版面宽出来的那截不算数。
+  // 否则露在视口里的那块版面永远落在画布的中央，四周的畸变与失焦就没了——竖屏手机上尤其明显。
+  vec2 boxUv = 0.5 + (screenUv - 0.5) / uBoxScale;
+  vec2 boxRes = uRes * uBoxScale;
+  vec2 centered = (boxUv - 0.5) * vec2(boxRes.x / boxRes.y, 1.0);
+  float radius = clamp(length(centered) / (0.5 * length(vec2(boxRes.x / boxRes.y, 1.0))), 0.0, 1.0);
   float edge = smoothstep(0.25, 1.0, radius);
   vec2 warpedUv = screenUv - (screenUv - 0.5) * (0.18 * uLens * edge);
 
@@ -128,19 +135,22 @@ in float aSeed;
 uniform vec2 uLightPos[3];
 uniform vec2 uLightSize[3];
 uniform float uLightAmp[3];
+uniform vec2 uBoxScale;
 uniform float uDust;
 out float vBright;
 void main() {
+  // aPos 是版面 uv（和光的位置同一套坐标），换算成画布 uv 再画：只画在视口里那块版面上
+  vec2 p = 0.5 + (aPos - 0.5) * uBoxScale;
   float light = 0.0;
   for (int i = 0; i < 3; i++) {
-    vec2 d = (aPos - uLightPos[i]) / uLightSize[i];
+    vec2 d = (p - uLightPos[i]) / uLightSize[i];
     light += clamp(1.0 - length(d) / 0.8, 0.0, 1.0) * uLightAmp[i];
   }
   // 光越足越亮；出了光就干脆不亮，不要整屏撒白点。
   // 单盏灯的中心光强只有 0.3 上下，所以阈值压得低，让一盏灯就够点亮附近的灰尘。
   vBright = smoothstep(0.05, 0.26, light) * uDust;
   // aPos 是 y 向下的屏幕 uv（和光的位置同一套坐标），GL 的 y 向上，这里翻一下
-  gl_Position = vec4(aPos.x * 2.0 - 1.0, 1.0 - aPos.y * 2.0, 0.0, 1.0);
+  gl_Position = vec4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
   // 点大小跟着光走：光里稍大稍亮一点，暗处收到 1px
   gl_PointSize = 1.0 + 3.0 * aSeed * (0.5 + vBright);
 }`;
@@ -294,6 +304,7 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       lightPos: gl.getUniformLocation(scene, "uLightPos"),
       lightSize: gl.getUniformLocation(scene, "uLightSize"),
       lightAmp: gl.getUniformLocation(scene, "uLightAmp"),
+      boxScale: gl.getUniformLocation(scene, "uBoxScale"),
     };
     const dustPosAttr = gl.getAttribLocation(dustProgram, "aPos");
     const dustSeedAttr = gl.getAttribLocation(dustProgram, "aSeed");
@@ -301,13 +312,17 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       lightPos: gl.getUniformLocation(dustProgram, "uLightPos"),
       lightSize: gl.getUniformLocation(dustProgram, "uLightSize"),
       lightAmp: gl.getUniformLocation(dustProgram, "uLightAmp"),
+      boxScale: gl.getUniformLocation(dustProgram, "uBoxScale"),
       dust: gl.getUniformLocation(dustProgram, "uDust"),
     };
 
     const lightColors = new Float32Array(LIGHTS.flatMap((l) => toRgb(l.color)));
     const lightAmps = new Float32Array(LIGHTS.map((l) => Number(l.color.match(/\/\s*([\d.]+)%/)?.[1] ?? 30) / 100));
-    const lightSizes = new Float32Array(LIGHTS.flatMap((l) => [...l.size]));
+    // 光的尺寸（uv 半轴）在 resize() 里按版面占画布的比例换算到画布坐标，所以这份是运行时值
+    const lightSizesUv = new Float32Array(LIGHTS.flatMap((l) => [...l.size]));
     const lightPosUv = new Float32Array(6);
+    /** 画布与「版面」的换算比：现在画布就是屏幕那块，恒等 */
+    const boxScale = new Float32Array([1, 1]);
 
     // —— CSS 令牌
     const blurPx = cssNumber("--lens-blur", 9);
@@ -349,13 +364,26 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
     const resize = () => {
       // 画布按 1:1 设备像素画：内容本身是 1280 宽的视频，放大到高 DPR 看不出差别，
       // 却要按面积多花几倍填充率（软件光栅化时尤其明显）。
-      // 尺寸取自容器而不是视口：容器就是首屏里那层画布，场景才跟着它走。
+      // 尺寸取自容器而不是视口：容器就是屏幕那一块画面（hero-scene.tsx 按素材里的屏幕洞量出来），
+      // 场景才跟着屏幕走。
+      // 用 offsetWidth/Height（排版尺寸）而不是 getBoundingClientRect()：外层把它缩进屏幕里时，
+      // 变换后的 rect 是缩过的，画布连同着色器里的 res 都会被量小，画面糊掉。
+      // 排版尺寸不受祖先 transform 影响，画布始终按「放到最大那一档」在画（见 landing().w），
+      // 缩下去只是被显示得小。
       const dpr = 1;
-      const rect = host.getBoundingClientRect();
-      width = rect.width;
-      height = rect.height;
+      width = host.offsetWidth;
+      height = host.offsetHeight;
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
+      // 画布就是屏幕那一块（见 hero-scene.tsx）：光的位置/尺寸、粒子位置、镜头半径原本都按
+      // 「版面」（首屏那一屏）调过，现在整块画布都在屏幕里，一比一换算即可——它们于是就配在
+      // 屏幕这个框里，画面是真的适配屏幕，而不是从一块大画面里裁一块塞进去。
+      boxScale[0] = 1;
+      boxScale[1] = 1;
+      for (let i = 0; i < LIGHTS.length; i++) {
+        lightSizesUv[i * 2] = LIGHTS[i].size[0] * boxScale[0];
+        lightSizesUv[i * 2 + 1] = LIGHTS[i].size[1] * boxScale[1];
+      }
       // 版面上的「一屏」高度（占位层是 100vh）：滚动模糊的进度按它算，不按 window.innerHeight——
       // 手机上滚起来地址栏会收，innerHeight 会跳一次，模糊就不该跟着跳。它只在版面变的时候才变，
       // 所以搭在这里量一次就够。
@@ -478,8 +506,9 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       for (let i = 0; i < LIGHTS.length; i++) {
         lightCurrent[i][0] += (lightTarget[i][0] - lightCurrent[i][0]) * LIGHTS[i].ease;
         lightCurrent[i][1] += (lightTarget[i][1] - lightCurrent[i][1]) * LIGHTS[i].ease;
-        lightPosUv[i * 2] = LIGHTS[i].origin[0] + lightCurrent[i][0];
-        lightPosUv[i * 2 + 1] = LIGHTS[i].origin[1] + lightCurrent[i][1];
+        // origin 与漂移都是版面比例，换算到画布坐标再传（画布比版面宽出来的部分不参与）
+        lightPosUv[i * 2] = 0.5 + (LIGHTS[i].origin[0] + lightCurrent[i][0] - 0.5) * boxScale[0];
+        lightPosUv[i * 2 + 1] = 0.5 + (LIGHTS[i].origin[1] + lightCurrent[i][1] - 0.5) * boxScale[1];
       }
 
       // 24fps 的视频配 60fps 的循环：同一帧不必反复上传（每帧一次 3.7MB 拷贝）
@@ -508,12 +537,17 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
       gl.uniform1f(sceneLoc.blurPx, blurPx);
       gl.uniform1f(sceneLoc.sweep, sweep);
       gl.uniform1f(sceneLoc.sweepBlur, sweepBlurPx);
-      gl.uniform1f(sceneLoc.edgePx, screenH - window.scrollY);
-      gl.uniform1f(sceneLoc.viewTop, rect.top);
-      gl.uniform1f(sceneLoc.viewH, viewH);
+      // 滚动模糊在着色器里按「屏幕坐标」算，而这块画布比视口大（还整体缩着）：先把视口换回画布像素。
+      // scale 是画面当前被缩到几分之一（含素材推近），rect 是变换后的框——减掉半高就是没缩过的顶边。
+      const fit = rect.width / width;
+      const canvasTop = rect.top + rect.height / 2 - (height * fit) / 2;
+      gl.uniform1f(sceneLoc.edgePx, (screenH - window.scrollY) / fit);
+      gl.uniform1f(sceneLoc.viewTop, canvasTop / fit);
+      gl.uniform1f(sceneLoc.viewH, viewH / fit);
+      gl.uniform2fv(sceneLoc.boxScale, boxScale);
       gl.uniform3fv(sceneLoc.lightColor, lightColors);
       gl.uniform2fv(sceneLoc.lightPos, lightPosUv);
-      gl.uniform2fv(sceneLoc.lightSize, lightSizes);
+      gl.uniform2fv(sceneLoc.lightSize, lightSizesUv);
       gl.uniform1fv(sceneLoc.lightAmp, lightAmps);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -544,8 +578,9 @@ export function SceneCanvas({ src, poster }: { src: string; poster: string }) {
           gl.vertexAttribPointer(dustSeedAttr, 1, gl.FLOAT, false, 0, 0);
         }
         gl.uniform2fv(dustLoc.lightPos, lightPosUv);
-        gl.uniform2fv(dustLoc.lightSize, lightSizes);
+        gl.uniform2fv(dustLoc.lightSize, lightSizesUv);
         gl.uniform1fv(dustLoc.lightAmp, lightAmps);
+        gl.uniform2fv(dustLoc.boxScale, boxScale);
         gl.uniform1f(dustLoc.dust, DUST_AMOUNT * (0.7 + 0.3 * lens));
         gl.drawArrays(gl.POINTS, 0, DUST_COUNT);
       }

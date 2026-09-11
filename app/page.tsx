@@ -8,7 +8,7 @@ const SHOW_NEWSPAPER = false;
 export default function Home() {
   return (
     <main>
-      {/* 首屏：一整屏的场景，滚动时它跟在滚轮后面慢慢往下走（见 hero-scene.tsx） */}
+      {/* 首屏：一整屏的场景。滚动时它跟在滚轮后面慢慢往下走，同时缩进 PC 素材的屏幕里（见 hero-scene.tsx） */}
       <HeroScene />
       {/*
         内页：一整屏的米黄纸（#F6E5BE）。
@@ -33,7 +33,7 @@ export default function Home() {
       </section>
       {SHOW_NEWSPAPER && <Newspaper />}
       {/* 进场：字从中间放大到溢出整屏，洞里透出画面，随后底色淡出 */}
-      <LoadingVeil preload={["/bg-v1.webp"]} />
+      <LoadingVeil preload={["/bg-v1.webp", "/pc_cutout.webp"]} />
     </main>
   );
 }
